@@ -1,21 +1,19 @@
-"""TCP localhost IPC listener for desktop pet phase signals.
-
-We use a loopback TCP socket instead of AF_UNIX so the same code runs on
-Linux, macOS, and Windows (whose CPython build still doesn't expose AF_UNIX).
-"""
+"""TCP localhost IPC listener for desktop pet phase signals and question/answer flow."""
+import json
 import os
 import socket
 import sys
+import threading
 from PySide6.QtCore import QThread, Signal
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 19847
 VALID_PHASES = {"idle", "question", "reading", "thinking", "writing", "executing", "done"}
+QUESTION_TIMEOUT_S = 120
 
 
 def _resolve_endpoint():
-    """Allow override via env vars, otherwise fall back to defaults."""
     host = os.environ.get("DESKTOP_PET_HOST", DEFAULT_HOST)
     try:
         port = int(os.environ.get("DESKTOP_PET_PORT", DEFAULT_PORT))
@@ -26,6 +24,7 @@ def _resolve_endpoint():
 
 class PetIPC(QThread):
     phase_changed = Signal(str)
+    question_received = Signal(str, list)  # text, options (list of {label,description})
 
     def __init__(self, host=None, port=None, parent=None):
         super().__init__(parent)
@@ -34,6 +33,19 @@ class PetIPC(QThread):
         self.port = port or default_port
         self._running = True
         self._server = None
+        self._answer_event = threading.Event()
+        self._answer_value = None
+        self._answer_lock = threading.Lock()
+
+    def set_answer(self, value):
+        with self._answer_lock:
+            self._answer_value = value
+            self._answer_event.set()
+
+    def _reset_answer_state(self):
+        with self._answer_lock:
+            self._answer_event.clear()
+            self._answer_value = None
 
     def run(self):
         try:
@@ -58,22 +70,55 @@ class PetIPC(QThread):
             except OSError:
                 break
             else:
-                try:
-                    data = conn.recv(1024).decode("utf-8", errors="replace").strip()
-                    if data and data in VALID_PHASES:
-                        self.phase_changed.emit(data)
-                except OSError:
-                    pass
-                finally:
-                    conn.close()
+                self._handle_connection(conn)
 
         server.close()
         self._server = None
 
+    def _handle_connection(self, conn):
+        try:
+            data = conn.recv(4096).decode("utf-8", errors="replace").strip()
+        except OSError:
+            conn.close()
+            return
+
+        if not data:
+            conn.close()
+            return
+
+        # JSON message → question/answer flow
+        if data.startswith("{"):
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                conn.close()
+                return
+
+            if msg.get("type") == "question":
+                text = msg.get("text", "")
+                options = msg.get("options", [])
+                self._reset_answer_state()
+                self.question_received.emit(text, options)
+
+                answered = self._answer_event.wait(QUESTION_TIMEOUT_S)
+                with self._answer_lock:
+                    selected = self._answer_value
+                response = json.dumps({"selected": selected if answered else None})
+                try:
+                    conn.sendall(response.encode("utf-8"))
+                except OSError:
+                    pass
+            conn.close()
+            return
+
+        # Plain word → phase change (backward-compatible)
+        if data in VALID_PHASES:
+            self.phase_changed.emit(data)
+        conn.close()
+
     def stop(self):
         self._running = False
-        # Force a socket close so accept() returns immediately instead of
-        # blocking up to the 500ms timeout.
+        self._answer_event.set()  # unblock any waiting question
         srv = self._server
         if srv is not None:
             try:

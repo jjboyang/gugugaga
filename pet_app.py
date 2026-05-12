@@ -138,6 +138,9 @@ def main():
     window.drag_ended.connect(engine.end_drag)
     window.pet_tapped.connect(engine.notify_pet_tap)
 
+    ipc.question_received.connect(lambda text, opts: window.show_question(text, opts))
+    window.question_answered.connect(ipc.set_answer)
+
     def on_hook_config():
         changed, path = _configure_hooks()
         if changed:

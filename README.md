@@ -46,6 +46,11 @@ python pet/generate_sprites.py
 python pet_app.py
 ```
 
+一键脚本（自动创建 `.venv`、安装依赖、生成精灵图）：
+
+- **macOS**：双击仓库根目录的 `start-pet.command`，或运行 `./scripts/macos/start-pet.sh`
+- **Windows**：双击或运行 `scripts\windows\start-pet.cmd`
+
 企鹅会出现在屏幕右下角，始终置顶。
 
 ### 配置 Claude Code Hook
@@ -100,8 +105,15 @@ python scripts/test-thinking-cycle.py --fast
 │       ├── writing/ executing/ done/
 │       ├── sleep/ angry/ dragged/
 ├── scripts/
+│   ├── macos/
+│   │   ├── start-pet.sh        # macOS 一键启动（chmod +x）
+│   │   └── start-pet.command   # Finder 双击（同目录）
+│   ├── windows/
+│   │   ├── start-pet.ps1       # Windows 一键启动（PowerShell）
+│   │   └── start-pet.cmd       # cmd / 资源管理器双击入口
 │   ├── notify-pet.py           # Hook 通知脚本
 │   └── test-thinking-cycle.py  # 阶段切换测试
+├── start-pet.command           # macOS：仓库根目录双击 → macos/start-pet.sh
 └── requirements.txt
 ```
 

@@ -4,7 +4,7 @@
   each animation looks right.
 
 .DESCRIPTION
-  Requires the pet to already be running (start-pet.ps1).
+  Requires the pet to already be running (scripts\windows\start-pet.ps1).
   Sends one phase notification, waits, then moves to the next.
 
 .PARAMETER Seconds
@@ -22,7 +22,7 @@ $VenvPy      = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
 $Notifier    = Join-Path $ScriptDir 'notify-pet.py'
 
 if (-not (Test-Path $VenvPy)) {
-    Write-Host "[demo-pet] venv not found. Run scripts\start-pet.ps1 first." -ForegroundColor Red
+    Write-Host "[demo-pet] venv not found. Run scripts\windows\start-pet.ps1 first." -ForegroundColor Red
     exit 1
 }
 

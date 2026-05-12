@@ -16,9 +16,9 @@
   Regenerates sprite PNGs.
 
 .EXAMPLE
-  .\scripts\start-pet.ps1
-  .\scripts\start-pet.ps1 -Debug
-  .\scripts\start-pet.ps1 -Reset
+  .\scripts\windows\start-pet.ps1
+  .\scripts\windows\start-pet.ps1 -Debug
+  .\scripts\windows\start-pet.ps1 -Reset
 #>
 
 param(
@@ -35,7 +35,7 @@ function Write-Die    ($msg) { Write-Host "[start-pet] $msg" -ForegroundColor Re
 
 # ---------- 1. locate project root ----------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = Resolve-Path (Join-Path $ScriptDir '..')
+$ProjectRoot = Resolve-Path (Join-Path $ScriptDir '..\..')
 Set-Location $ProjectRoot
 
 $VenvDir   = Join-Path $ProjectRoot '.venv'

@@ -41,17 +41,17 @@ _SILENCE_IDLE_PHASES = frozenset(
 )
 
 STATE_CONFIG = {
-    "idle":      {"interval": 150, "loops": True},
-    "question":  {"interval": 80,  "loops": False},
-    "reading":   {"interval": 120, "loops": True},
-    "thinking":  {"interval": 120, "loops": True},
-    "writing":   {"interval": 100, "loops": True},
-    "executing": {"interval": 80,  "loops": True},
-    "done":      {"interval": 100, "loops": False},
+    "idle":      {"interval": 380, "loops": True},
+    "question":  {"interval": 200, "loops": False},
+    "reading":   {"interval": 320, "loops": True},
+    "thinking":  {"interval": 320, "loops": True},
+    "writing":   {"interval": 260, "loops": True},
+    "executing": {"interval": 200, "loops": True},
+    "done":      {"interval": 250, "loops": False},
     # Local-only: deep idle / annoyance / drag.
-    "sleep":     {"interval": 180, "loops": True},
-    "angry":     {"interval": 85,  "loops": False},
-    "dragged":   {"interval": 110, "loops": True},
+    "sleep":     {"interval": 450, "loops": True},
+    "angry":     {"interval": 180, "loops": False},
+    "dragged":   {"interval": 280, "loops": True},
 }
 
 

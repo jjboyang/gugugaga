@@ -3,7 +3,6 @@ import math
 import sys
 from PySide6.QtCore import Qt, QPoint, Signal
 from PySide6.QtGui import (
-    QAction,
     QGuiApplication,
     QMouseEvent,
     QPainter,
@@ -12,7 +11,7 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QWidget, QLabel, QMenu
+from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton
 
 
 # Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
@@ -28,6 +27,7 @@ class PetWindow(QWidget):
     drag_ended = Signal()
     hook_config_requested = Signal()
     pet_tapped = Signal()
+    question_answered = Signal(str)  # selected option label
 
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
@@ -258,16 +258,168 @@ class PetWindow(QWidget):
                 self.pet_tapped.emit()
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setAttribute(Qt.WA_TranslucentBackground, False)
+        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setAttribute(Qt.WA_ShowWithoutActivating)
+        popup.setStyleSheet("""
+            QWidget#menuPanel {
+                background: rgba(30, 30, 30, 0.92);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 10px;
+            }
+            QPushButton {
+                color: #e0e0e0;
+                background: transparent;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-size: 14px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.12);
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background: rgba(255, 255, 255, 0.06);
+            }
+        """)
 
-        hook_act = QAction("配置Hook", menu)
-        hook_act.triggered.connect(self.hook_config_requested.emit)
-        menu.addAction(hook_act)
+        panel = QWidget(popup)
+        panel.setObjectName("menuPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
 
-        menu.addSeparator()
+        hook_btn = QPushButton("配置Hook")
+        hook_btn.setCursor(Qt.PointingHandCursor)
+        hook_btn.clicked.connect(lambda: self._on_menu_action(popup, "hook"))
+        layout.addWidget(hook_btn)
 
-        quit_act = QAction("退出", menu)
-        quit_act.triggered.connect(self.quit_requested.emit)
-        menu.addAction(quit_act)
-        menu.exec(event.globalPos())
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
+        layout.addWidget(sep)
+
+        quit_btn = QPushButton("退出")
+        quit_btn.setCursor(Qt.PointingHandCursor)
+        quit_btn.clicked.connect(lambda: self._on_menu_action(popup, "quit"))
+        layout.addWidget(quit_btn)
+
+        panel_layout = QVBoxLayout(popup)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(panel)
+
+        popup.adjustSize()
+
+        pet_geom = self.frameGeometry()
+        popup_x = pet_geom.right() + 8
+        popup_y = pet_geom.top()
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            if popup_x + popup.width() > avail.right():
+                popup_x = pet_geom.left() - popup.width() - 8
+            if popup_y + popup.height() > avail.bottom():
+                popup_y = avail.bottom() - popup.height()
+
+        popup.move(popup_x, popup_y)
+        popup.show()
+
+    def _on_menu_action(self, popup, action):
+        popup.close()
+        if action == "hook":
+            self.hook_config_requested.emit()
+        elif action == "quit":
+            self.quit_requested.emit()
+
+    def show_question(self, text, options):
+        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setAttribute(Qt.WA_ShowWithoutActivating)
+        popup.setStyleSheet("""
+            QWidget#questionPanel {
+                background: rgba(30, 30, 30, 0.94);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 12px;
+            }
+            QLabel#questionText {
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 2px 4px;
+            }
+            QPushButton {
+                color: #e0e0e0;
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 10px 18px;
+                font-size: 13px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.18);
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.25);
+            }
+            QPushButton:pressed {
+                background: rgba(255, 255, 255, 0.08);
+            }
+        """)
+
+        panel = QWidget(popup)
+        panel.setObjectName("questionPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+        max_width = 260
+
+        qlabel = QLabel(text)
+        qlabel.setObjectName("questionText")
+        qlabel.setWordWrap(True)
+        qlabel.setMaximumWidth(max_width)
+        layout.addWidget(qlabel)
+
+        for opt in options:
+            label = opt.get("label", "")
+            desc = opt.get("description", "")
+            btn_text = label if not desc else f"{label}\n{desc}"
+
+            btn = QPushButton(btn_text)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMaximumWidth(max_width)
+
+            def make_handler(selected_label):
+                return lambda: self._on_question_action(popup, selected_label)
+
+            btn.clicked.connect(make_handler(label))
+            layout.addWidget(btn)
+
+        panel_layout = QVBoxLayout(popup)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(panel)
+
+        popup.adjustSize()
+
+        pet_geom = self.frameGeometry()
+        popup_x = pet_geom.right() + 8
+        popup_y = pet_geom.top()
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            if popup_x + popup.width() > avail.right():
+                popup_x = pet_geom.left() - popup.width() - 8
+            if popup_y + popup.height() > avail.bottom():
+                popup_y = avail.bottom() - popup.height()
+            if popup_y < avail.top():
+                popup_y = avail.top()
+
+        popup.move(popup_x, popup_y)
+        popup.show()
+
+    def _on_question_action(self, popup, selected):
+        popup.close()
+        self.question_answered.emit(selected)
