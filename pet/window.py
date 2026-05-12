@@ -1,7 +1,9 @@
 """Transparent, always-on-top, draggable pet window."""
+import ctypes
 import math
 import sys
-from PySide6.QtCore import Qt, QPoint, Signal
+import time
+from PySide6.QtCore import Qt, QPoint, QTimer, Signal
 from PySide6.QtGui import (
     QGuiApplication,
     QMouseEvent,
@@ -69,6 +71,7 @@ class PetWindow(QWidget):
         # drawing around frameless top-level windows. Best-effort; safe if it
         # fails (e.g. non-Windows, older Win10 builds).
         self._disable_windows_shadow()
+        self._disable_mac_shadow()
 
         self._drag_offset = QPoint()
         self._dragging = False
@@ -78,6 +81,9 @@ class PetWindow(QWidget):
         # Smoothed horizontal drag velocity → pendulum-like sway angle (degrees).
         self._sway_velocity_smooth = 0.0
         self._sway_angle = 0.0
+        # Belly triple-tap easter egg
+        self._belly_tap_times = []
+        self._speech_popup = None
         self._last_scaled_pixmap = QPixmap()
 
     def _disable_windows_shadow(self):
@@ -133,11 +139,60 @@ class PetWindow(QWidget):
             # Older Windows builds without these attributes - harmless.
             pass
 
+    def _disable_mac_shadow(self):
+        """Remove NSWindow shadow and enforce transparent background."""
+        if sys.platform != "darwin":
+            return
+        try:
+            objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+
+            objc.objc_getClass.restype = ctypes.c_void_p
+            objc.objc_getClass.argtypes = [ctypes.c_char_p]
+            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+            msg_addr = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+
+            # (id, SEL) -> id
+            _SID = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+            send_id = _SID(msg_addr)
+
+            # (id, SEL, BOOL) -> void
+            _SVB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)
+            send_void_bool = _SVB(msg_addr)
+
+            # (id, SEL, id) -> void
+            _SVI = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+            send_void_id = _SVI(msg_addr)
+
+            view = ctypes.c_void_p(int(self.winId()))
+            sel_window = objc.sel_registerName(b"window")
+            window = send_id(view, sel_window)
+
+            if not window:
+                return
+
+            # [window setHasShadow:NO]
+            send_void_bool(window, objc.sel_registerName(b"setHasShadow:"), ctypes.c_bool(False))
+
+            # [window setOpaque:NO]
+            send_void_bool(window, objc.sel_registerName(b"setOpaque:"), ctypes.c_bool(False))
+
+            # [window setBackgroundColor:[NSColor clearColor]]
+            cls_color = objc.objc_getClass(b"NSColor")
+            sel_clear = objc.sel_registerName(b"clearColor")
+            clear_color = send_id(cls_color, sel_clear)
+            if clear_color:
+                send_void_id(window, objc.sel_registerName(b"setBackgroundColor:"), clear_color)
+        except (OSError, AttributeError):
+            pass
+
     def showEvent(self, event):
         # Some DWM attributes only stick once the window has a composited
         # surface, so re-apply them on first show.
         super().showEvent(event)
         self._disable_windows_shadow()
+        self._disable_mac_shadow()
 
     def paintEvent(self, event):
         # Normal mode: draw nothing so only the sprite shows. Debug mode keeps
@@ -256,6 +311,94 @@ class PetWindow(QWidget):
                 self.drag_ended.emit()
             else:
                 self.pet_tapped.emit()
+                self._check_belly_tap(event.position().toPoint())
+
+    # --- Belly triple-tap easter egg ---
+    _BELLY_Y_MIN_RATIO = 0.55
+    _BELLY_TAP_WINDOW_S = 1.5
+    _BELLY_TAP_COUNT = 3
+
+    def _check_belly_tap(self, pos):
+        """Detect triple-tap on the belly area."""
+        belly_y = int(WINDOW_SIZE * self._BELLY_Y_MIN_RATIO)
+        if pos.y() < belly_y:
+            return
+
+        now = time.monotonic()
+        self._belly_tap_times = [t for t in self._belly_tap_times if now - t < self._BELLY_TAP_WINDOW_S]
+        self._belly_tap_times.append(now)
+
+        if len(self._belly_tap_times) >= self._BELLY_TAP_COUNT:
+            self._belly_tap_times.clear()
+            self._show_speech_bubble("咕咕嘎嘎")
+
+    def _show_speech_bubble(self, text):
+        """Show a speech bubble above the pet that auto-dismisses."""
+        # Close previous bubble if still visible
+        if self._speech_popup is not None:
+            try:
+                self._speech_popup.close()
+            except RuntimeError:
+                pass
+            self._speech_popup = None
+
+        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setAttribute(Qt.WA_ShowWithoutActivating)
+        popup.setStyleSheet("""
+            QWidget#speechBubble {
+                background: rgba(40, 40, 40, 0.90);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #ffffff;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 10px 18px;
+            }
+        """)
+
+        panel = QWidget(popup)
+        panel.setObjectName("speechBubble")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(4, 2, 4, 2)
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
+
+        panel_layout = QVBoxLayout(popup)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(panel)
+
+        popup.adjustSize()
+
+        pet_geom = self.frameGeometry()
+        popup_x = pet_geom.center().x() - popup.width() // 2
+        popup_y = pet_geom.top() - popup.height() - 6
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            if popup_x < avail.left():
+                popup_x = avail.left() + 4
+            elif popup_x + popup.width() > avail.right():
+                popup_x = avail.right() - popup.width() - 4
+            if popup_y < avail.top():
+                popup_y = pet_geom.bottom() + 6
+
+        popup.move(popup_x, popup_y)
+        popup.show()
+        self._speech_popup = popup
+        QTimer.singleShot(2200, self._dismiss_speech_bubble)
+
+    def _dismiss_speech_bubble(self):
+        if self._speech_popup is not None:
+            try:
+                self._speech_popup.close()
+            except RuntimeError:
+                pass
+            self._speech_popup = None
 
     def contextMenuEvent(self, event):
         popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
