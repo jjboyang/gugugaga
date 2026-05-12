@@ -1,19 +1,13 @@
-"""Generate sprite frames from the AI-generated base character image.
+"""Generate sprite frames for the desktop pet.
 
-Pipeline:
-  1. Load assets/aigen-idle-v1.png (AI-generated chibi penguin girl on a
-     near-white studio backdrop).
-  2. Remove the near-white background via per-pixel alpha keying with a
-     small feather, producing a clean transparent cutout.
-  3. Tightly crop to the character bounding box, then place onto a square
-     200x200 canvas with a small margin.
-  4. For each of the 7 phases, render multiple frames composing the base
-     character with phase-specific overlays (question mark, thinking dots,
-     keyboard, sparkles, etc.) and tiny per-frame motion (breathing bob).
+Pipeline A — AI bases (optional):
+  When assets/aigen-*.png exist, load + alpha-key + trim, then add motion/overlays.
 
-This keeps the character 100% consistent across phases — only environment
-and small accessories change — which is the most failure-proof way to use
-AI-generated art for sprite animation.
+Pipeline B — procedural mascot (default when AI files are missing):
+  pet/procedural_mascot.py draws a consistent chibi penguin; motion/overlays match pipeline A.
+
+Run from repo root:  python pet/generate_sprites.py
+Requires: Pillow
 """
 import math
 import os
@@ -31,15 +25,16 @@ OUT_SIZE = 200
 # images themselves; per-frame variation only adds a small bob + optional
 # environmental overlay (question mark, thinking dots, sparkles).
 PHASES = {
-    "idle":      {"frames": 6, "base": "aigen-idle-v1.png"},
-    "question":  {"frames": 4, "base": "aigen-question-v1.png"},
-    "reading":   {"frames": 6, "base": "aigen-reading-v1.png"},
-    "thinking":  {"frames": 6, "base": "aigen-thinking-v1.png"},
-    "writing":   {"frames": 4, "base": "aigen-writing-v1.png"},
-    "executing": {"frames": 6, "base": "aigen-executing-v1.png"},
-    "done":      {"frames": 4, "base": "aigen-done-v1.png"},
-    # Used only locally when the user grabs the pet — never sent over IPC.
-    "dragged":   {"frames": 4, "base": "aigen-dragged-v1.png"},
+    "idle":      {"frames": 12, "base": "aigen-idle-v1.png"},
+    "question":  {"frames": 8, "base": "aigen-question-v1.png"},
+    "reading":   {"frames": 12, "base": "aigen-reading-v1.png"},
+    "thinking":  {"frames": 12, "base": "aigen-thinking-v1.png"},
+    "writing":   {"frames": 10, "base": "aigen-writing-v1.png"},
+    "executing": {"frames": 10, "base": "aigen-executing-v1.png"},
+    "done":      {"frames": 8, "base": "aigen-done-v1.png"},
+    "dragged":   {"frames": 6, "base": "aigen-dragged-v1.png"},
+    "sleep":     {"frames": 10, "base": "aigen-idle-v1.png"},
+    "angry":     {"frames": 8, "base": "aigen-idle-v1.png"},
 }
 
 ACCENT_BLUE = (70, 150, 210, 255)
@@ -194,6 +189,36 @@ def overlay_done(canvas: Image.Image, frame: int, total: int):
         draw.polygon(points, fill=(255, 215, 80, 255))
 
 
+def overlay_sleep(canvas: Image.Image, frame: int, total: int):
+    """Floating Zs (closed eyes are drawn on the procedural / AI base)."""
+    draw = ImageDraw.Draw(canvas)
+    w, h = canvas.size
+    bob = int(math.sin(frame / max(1, total) * 2 * math.pi) * 7)
+    font = _font(max(12, int(h * 0.11)))
+    zz = "Z" * (1 + (frame % 3))
+    draw.text(
+        (int(w * 0.76), int(h * 0.12) + bob), zz, anchor="mm", font=font,
+        fill=(140, 150, 168, 255),
+    )
+
+
+def overlay_angry(canvas: Image.Image, frame: int, total: int):
+    """Popping vein + cheek flush (face is on the base sprite)."""
+    draw = ImageDraw.Draw(canvas)
+    w, h = canvas.size
+    shake = int(5 * math.sin(frame * 2.9))
+    cx = int(w * 0.74) + shake
+    cy = int(h * 0.26)
+    draw.line((cx - 11, cy - 11, cx + 11, cy + 11), fill=(215, 60, 55), width=4)
+    draw.line((cx - 11, cy + 11, cx + 11, cy - 11), fill=(215, 60, 55), width=4)
+    r = max(3, int(h * 0.035))
+    for sx in (int(w * 0.30), int(w * 0.70)):
+        draw.ellipse(
+            (sx - r, int(h * 0.48) - r, sx + r, int(h * 0.48) + r),
+            fill=(255, 120, 120, 110),
+        )
+
+
 OVERLAYS = {
     "idle":      None,
     "question":  overlay_question,
@@ -203,30 +228,118 @@ OVERLAYS = {
     "executing": overlay_executing,
     "done":      overlay_done,
     "dragged":   None,                # pose + AI-rendered swoosh handles it
+    "sleep":     overlay_sleep,
+    "angry":     overlay_angry,
 }
 
 
 # ============================================================================
-# Step 4 — assemble
+# Step 4 — per-frame body motion (translate + rotate) then assemble
+# ============================================================================
+def _motion_triplet(phase: str, frame: int, total: int) -> tuple[float, float, float]:
+    """Return (dx, dy, rotate_deg) for Pillow rotate(..., translate=(dx,dy))."""
+    u = frame / max(1, total)
+    t = u * 2 * math.pi
+
+    if phase == "idle":
+        # Subtle idle — window drag already adds rotation; keep base almost still.
+        return (
+            math.sin(t * 0.85) * 3.0,
+            math.sin(t) * 4.0,
+            math.sin(t * 0.65 + 0.25) * 4.5,
+        )
+    if phase == "sleep":
+        ts = t * 0.38
+        return (
+            math.sin(ts) * 5.0,
+            math.sin(ts * 1.3) * 6.0,
+            -10.0 + math.sin(ts * 0.9) * 4.0,
+        )
+    if phase == "angry":
+        return (
+            math.sin(t * 4.2) * 12.0 + math.sin(t * 6.1) * 4.0,
+            math.sin(t * 3.0) * 5.0,
+            math.sin(t * 3.8) * 14.0,
+        )
+    if phase == "question":
+        return (
+            math.sin(t * 1.4) * 6.0,
+            math.sin(t * 2.0) * 9.0,
+            math.sin(t * 2.1) * 16.0,
+        )
+    if phase == "reading":
+        return (
+            math.sin(t * 1.25) * 16.0,
+            abs(math.sin(t * 1.25)) * 10.0,
+            math.sin(t * 0.9) * 13.0,
+        )
+    if phase == "thinking":
+        return (
+            math.sin(t * 0.75) * 11.0,
+            math.sin(t * 1.1) * 10.0,
+            math.sin(t) * 17.0 + math.sin(2 * t) * 8.0,
+        )
+    if phase == "writing":
+        return (
+            math.sin(t * 1.5) * 7.0,
+            math.sin(t * 2.7) * 9.0,
+            math.sin(t * 1.9) * 10.0,
+        )
+    if phase == "executing":
+        return (
+            math.sin(t * 1.7) * 12.0,
+            math.sin(t * 1.4) * 8.0,
+            math.sin(t * 1.55) * 14.0,
+        )
+    if phase == "done":
+        return (
+            math.sin(t * 1.2) * 9.0,
+            math.sin(t) * 11.0,
+            math.sin(t * 0.8) * 13.0,
+        )
+    if phase == "dragged":
+        # Light loop while grabbed; main motion comes from PetWindow sway.
+        return (
+            math.sin(t * 1.1) * 2.5,
+            math.sin(t * 1.6) * 3.0,
+            math.sin(t * 1.5) * 5.0,
+        )
+    # fallback
+    return (math.sin(t) * 6.0, math.sin(t) * 7.0, math.sin(t) * 8.0)
+
+
+def apply_body_motion(base: Image.Image, phase: str, frame: int, total: int) -> Image.Image:
+    dx, dy, rot = _motion_triplet(phase, frame, total)
+    ix = int(round(dx))
+    iy = int(round(dy))
+    return base.rotate(
+        rot,
+        resample=Image.BICUBIC,
+        expand=False,
+        translate=(ix, iy),
+        fillcolor=(0, 0, 0, 0),
+    )
+
+
+# ============================================================================
+# Step 5 — assemble
 # ============================================================================
 def base_sprite(phase_name: str) -> Image.Image:
     cfg = PHASES[phase_name]
-    path = os.path.join(ASSETS_DIR, cfg["base"])
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"AI base image not found for phase {phase_name!r} at {path}. "
-            "Regenerate it via the GenerateImage tool first."
-        )
-    raw = Image.open(path).convert("RGBA")
-    cut = alpha_key_white(raw)
-    return trim_and_fit(cut, OUT_SIZE)
+    base_file = cfg.get("base")
+    path = os.path.join(ASSETS_DIR, base_file) if base_file else ""
+    if base_file and os.path.isfile(path):
+        raw = Image.open(path).convert("RGBA")
+        cut = alpha_key_white(raw)
+        return trim_and_fit(cut, OUT_SIZE)
+    from procedural_mascot import render_phase_base
+    return render_phase_base(phase_name, OUT_SIZE)
 
 
 def render_frame(base: Image.Image, phase: str, frame: int, total: int) -> Image.Image:
+    body = apply_body_motion(base, phase, frame, total)
     canvas = Image.new("RGBA", (OUT_SIZE, OUT_SIZE), (0, 0, 0, 0))
-    # Gentle breathing bob across all phases.
-    bob = int(math.sin(frame / max(1, total) * 2 * math.pi) * 3)
-    canvas.paste(base, (0, bob), base)
+    canvas.paste(body, (0, 0), body)
 
     overlay = OVERLAYS.get(phase)
     if overlay is not None:
@@ -248,6 +361,6 @@ def generate_sprites():
 
 
 if __name__ == "__main__":
-    print("Generating sprites from AI base...")
+    print("Generating sprites (AI assets if present, else procedural mascot)...")
     generate_sprites()
     print("Done.")

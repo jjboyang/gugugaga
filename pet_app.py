@@ -35,6 +35,10 @@ PET_HOOKS_TEMPLATE = {
     "UserPromptSubmit": [
         {"command": "{notify} question"}
     ],
+    # After each tool batch resolves, before the next model request — matches "Claude is thinking".
+    "PostToolBatch": [
+        {"command": "{notify} thinking"}
+    ],
     "PostToolUse": [
         {"matcher": "Read|Grep|Glob", "command": "{notify} reading"},
         {"matcher": "Edit|Write", "command": "{notify} writing"},
@@ -78,28 +82,25 @@ def _configure_hooks():
 
     # Track whether hooks already match
     existing_hooks = existing.get("hooks", {})
-    existing_pet_keys = set(existing_hooks) & set(pet_hooks)
-    already_configured = False
-    if existing_pet_keys:
-        # Check one command to see if it points to our notify script
-        sample = existing_hooks.get("SessionStart")
-        if sample:
-            first_cmd = sample[0].get("command", "") if sample else ""
-            if str(notify_script) in first_cmd:
-                already_configured = True
 
     changed = False
-    if not already_configured:
-        merged_hooks = dict(existing_hooks)
-        for event, new_entries in pet_hooks.items():
-            if event in merged_hooks:
-                merged_hooks[event] = list(merged_hooks[event]) + new_entries
-            else:
-                merged_hooks[event] = new_entries
+    # Merge template entries that are still missing (e.g. new PostToolBatch after an old install).
+    merged_hooks = dict(existing_hooks)
+    for event, new_entries in pet_hooks.items():
+        existing_list = list(merged_hooks.get(event, []))
+        have = {e.get("command") for e in existing_list}
+        for entry in new_entries:
+            cmd = entry.get("command", "")
+            if cmd and cmd not in have:
+                existing_list.append(entry)
+                have.add(cmd)
+                changed = True
+        if existing_list:
+            merged_hooks[event] = existing_list
+    if changed:
         existing["hooks"] = merged_hooks
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), "utf-8")
-        changed = True
 
     # Open the settings file in the default editor
     try:
@@ -132,8 +133,10 @@ def main():
     ipc.phase_changed.connect(engine.set_state)
     engine.frame_changed.connect(window.set_pixmap)
 
+    window.drag_started.connect(engine.notify_user_activity)
     window.drag_started.connect(engine.begin_drag)
     window.drag_ended.connect(engine.end_drag)
+    window.pet_tapped.connect(engine.notify_pet_tap)
 
     def on_hook_config():
         changed, path = _configure_hooks()
@@ -144,8 +147,9 @@ def main():
             )
         else:
             QMessageBox.information(
-                window, "Hook 已存在",
-                f"宠物 Hook 已存在, 文件:\n{path}\n\n请直接编辑修改 Hook 路径。"
+                window, "Hook 已同步",
+                f"未发现需要新增的宠物 Hook 条目（或已全部存在）。\n文件:\n{path}\n\n"
+                "若你刚升级过桌宠，请确认其中包含 PostToolBatch → thinking。"
             )
 
     window.hook_config_requested.connect(on_hook_config)

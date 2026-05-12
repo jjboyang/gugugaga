@@ -18,12 +18,16 @@ from PySide6.QtWidgets import QWidget, QLabel, QMenu
 # Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
 WINDOW_SIZE = 140
 
+# Movement below this (logical px) counts as a tap, not a drag.
+_DRAG_COMMIT_THRESHOLD_PX = 12
+
 
 class PetWindow(QWidget):
     quit_requested = Signal()
     drag_started = Signal()
     drag_ended = Signal()
     hook_config_requested = Signal()
+    pet_tapped = Signal()
 
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
@@ -68,6 +72,8 @@ class PetWindow(QWidget):
 
         self._drag_offset = QPoint()
         self._dragging = False
+        self._left_down = False
+        self._press_global = QPoint()
         self._last_global_pos = QPoint()
         # Smoothed horizontal drag velocity → pendulum-like sway angle (degrees).
         self._sway_velocity_smooth = 0.0
@@ -177,20 +183,33 @@ class PetWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            self._dragging = True
-            self._last_global_pos = event.globalPosition().toPoint()
+            self._left_down = True
+            self._dragging = False
+            self._press_global = event.globalPosition().toPoint()
+            self._last_global_pos = self._press_global
             self._sway_velocity_smooth = 0.0
             self._sway_angle = 0.0
-            # Capture moves on Windows even when the cursor stays aligned with the window chrome.
-            try:
-                self.grabMouse()
-            except Exception:
-                pass
-            self.drag_started.emit()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if event.buttons() & Qt.LeftButton:
             cur = event.globalPosition().toPoint()
+            if self._left_down and not self._dragging:
+                moved = max(
+                    abs(cur.x() - self._press_global.x()),
+                    abs(cur.y() - self._press_global.y()),
+                )
+                if moved >= _DRAG_COMMIT_THRESHOLD_PX:
+                    self._dragging = True
+                    self._last_global_pos = cur
+                    try:
+                        self.grabMouse()
+                    except Exception:
+                        pass
+                    self.drag_started.emit()
+
+            if not self._dragging:
+                return
+
             dx = cur.x() - self._last_global_pos.x()
             dy = cur.y() - self._last_global_pos.y()
             self._last_global_pos = cur
@@ -222,6 +241,8 @@ class PetWindow(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
+            was_drag = self._dragging
+            self._left_down = False
             self._drag_offset = QPoint()
             self._dragging = False
             self._sway_velocity_smooth = 0.0
@@ -231,7 +252,10 @@ class PetWindow(QWidget):
             except Exception:
                 pass
             self._apply_label_pixmap()
-            self.drag_ended.emit()
+            if was_drag:
+                self.drag_ended.emit()
+            else:
+                self.pet_tapped.emit()
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)

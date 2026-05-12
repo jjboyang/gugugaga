@@ -1,5 +1,6 @@
 """Animation state machine and sprite frame controller."""
 import os
+import time
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
 
@@ -8,8 +9,8 @@ SPRITES_DIR = os.path.join(os.path.dirname(__file__), "sprites")
 
 # After reading/writing with no new IPC for this long → "thinking" (between tools).
 _GAP_TO_THINKING_MS = 3000
-# After user submit ("question"), switch to thinking so the pet matches model reasoning
-# before the first tool hook fires (hooks never send "thinking" directly).
+# After user submit ("question"), switch to thinking until the first tool signal arrives.
+# PostToolBatch also sends "thinking" between tool batches (see pet_app PET_HOOKS_TEMPLATE).
 _QUESTION_TO_THINKING_MS = 1200
 # After "done" animation finishes, wait this long then switch to idle.
 _DONE_TO_IDLE_MS = 3000
@@ -27,6 +28,13 @@ def _env_ms(name, default):
 # on active phases. Set DESKTOP_PET_SILENCE_IDLE_MS=0 to disable.
 _DEFAULT_SILENCE_IDLE_MS = 25000
 
+# After this long in *idle* with no IPC / local activity → sleep (local only).
+_DEFAULT_IDLE_TO_SLEEP_MS = 20000
+
+# Rapid taps (short clicks, not drags) within this window → angry.
+_ANGRY_TAP_WINDOW_S = 1.35
+_ANGRY_TAP_COUNT = 4
+
 # Phases where prolonged silence should eventually mean "turn finished".
 _SILENCE_IDLE_PHASES = frozenset(
     {"question", "reading", "thinking", "writing", "executing"}
@@ -40,7 +48,9 @@ STATE_CONFIG = {
     "writing":   {"interval": 100, "loops": True},
     "executing": {"interval": 80,  "loops": True},
     "done":      {"interval": 100, "loops": False},
-    # Local interaction-only state shown while the user is dragging the pet.
+    # Local-only: deep idle / annoyance / drag.
+    "sleep":     {"interval": 180, "loops": True},
+    "angry":     {"interval": 85,  "loops": False},
     "dragged":   {"interval": 110, "loops": True},
 }
 
@@ -81,6 +91,19 @@ class AnimationEngine(QObject):
         self._silence_to_idle_ms = _env_ms(
             "DESKTOP_PET_SILENCE_IDLE_MS", _DEFAULT_SILENCE_IDLE_MS
         )
+        self._idle_to_sleep_ms = _env_ms(
+            "DESKTOP_PET_IDLE_SLEEP_MS", _DEFAULT_IDLE_TO_SLEEP_MS
+        )
+
+        self._idle_sleep_timer = QTimer(self)
+        self._idle_sleep_timer.setSingleShot(True)
+        self._idle_sleep_timer.timeout.connect(self._on_idle_sleep_timeout)
+
+        self._angry_done_timer = QTimer(self)
+        self._angry_done_timer.setSingleShot(True)
+        self._angry_done_timer.timeout.connect(self._to_idle_after_angry)
+
+        self._tap_times = []
 
         self._load_all_sprites()
 
@@ -106,7 +129,7 @@ class AnimationEngine(QObject):
         colors = {
             "idle": "#3498db", "question": "#f39c12", "reading": "#2ecc71",
             "thinking": "#9b59b6", "writing": "#e74c3c", "executing": "#1abc9c",
-            "done": "#f1c40f",
+            "done": "#f1c40f", "sleep": "#5d6d7e", "angry": "#c0392b",
         }
         color = QColor(colors.get(phase, "#95a5a6"))
         painter.setBrush(color)
@@ -148,10 +171,19 @@ class AnimationEngine(QObject):
             if phase in _SILENCE_IDLE_PHASES:
                 self._schedule_silence_idle(phase)
                 return
+            if phase == "idle":
+                self._schedule_idle_sleep()
+                return
+            if phase == "sleep":
+                return
             return
 
         self._thinking_timer.stop()
         self._done_timer.stop()
+        self._angry_done_timer.stop()
+
+        if phase not in ("idle", "sleep", "angry", "dragged"):
+            self._tap_times.clear()
 
         self.current_phase = phase
         self.frame_index = 0
@@ -164,6 +196,47 @@ class AnimationEngine(QObject):
             self._thinking_timer.start(_QUESTION_TO_THINKING_MS)
 
         self._schedule_silence_idle(phase)
+        if phase == "idle":
+            self._schedule_idle_sleep()
+        else:
+            self._idle_sleep_timer.stop()
+
+    def notify_user_activity(self):
+        """Wake from sleep or reset the idle→sleep countdown (drag / tap)."""
+        if self.current_phase == "sleep":
+            self.set_state("idle")
+            return
+        if self.current_phase == "idle":
+            self._schedule_idle_sleep()
+
+    def notify_pet_tap(self):
+        """Short click on the pet — wakes from sleep and may trigger angry."""
+        self.notify_user_activity()
+        if self._is_dragging:
+            return
+        if self.current_phase != "idle":
+            return
+        now = time.monotonic()
+        self._tap_times = [t for t in self._tap_times if now - t < _ANGRY_TAP_WINDOW_S]
+        self._tap_times.append(now)
+        if len(self._tap_times) >= _ANGRY_TAP_COUNT:
+            self._tap_times.clear()
+            self.set_state("angry")
+
+    def _schedule_idle_sleep(self):
+        self._idle_sleep_timer.stop()
+        if self._idle_to_sleep_ms <= 0:
+            return
+        if self.current_phase == "idle":
+            self._idle_sleep_timer.start(self._idle_to_sleep_ms)
+
+    def _on_idle_sleep_timeout(self):
+        if self.current_phase == "idle":
+            self.set_state("sleep")
+
+    def _to_idle_after_angry(self):
+        if self.current_phase == "angry":
+            self.set_state("idle")
 
     def _schedule_silence_idle(self, phase):
         self._silence_idle_timer.stop()
@@ -215,6 +288,9 @@ class AnimationEngine(QObject):
                 self._done_timer.start(_DONE_TO_IDLE_MS)
                 return
             elif self.current_phase == "question":
+                return
+            elif self.current_phase == "angry":
+                self._angry_done_timer.start(450)
                 return
         self._emit_frame()
 
