@@ -15,15 +15,15 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget, QLabel, QMenu
 
 
-WINDOW_SIZE = 200
+# Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
+WINDOW_SIZE = 140
 
 
 class PetWindow(QWidget):
-    # Emitted when the user picks "退出" from the right-click menu.
     quit_requested = Signal()
-    # Emitted while the user is grabbing/dragging the window with the mouse.
     drag_started = Signal()
     drag_ended = Signal()
+    hook_config_requested = Signal()
 
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
@@ -236,6 +236,13 @@ class PetWindow(QWidget):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_TranslucentBackground, False)
+
+        hook_act = QAction("配置Hook", menu)
+        hook_act.triggered.connect(self.hook_config_requested.emit)
+        menu.addAction(hook_act)
+
+        menu.addSeparator()
+
         quit_act = QAction("退出", menu)
         quit_act.triggered.connect(self.quit_requested.emit)
         menu.addAction(quit_act)
