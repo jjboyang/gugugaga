@@ -138,6 +138,9 @@ def main():
     window.drag_ended.connect(engine.end_drag)
     window.pet_tapped.connect(engine.notify_pet_tap)
 
+    engine.waddle_started.connect(window.start_waddle)
+    window.waddle_completed.connect(engine.on_waddle_complete)
+
     ipc.question_received.connect(lambda text, opts: window.show_question(text, opts))
     window.question_answered.connect(ipc.set_answer)
 

@@ -30,6 +30,7 @@ class PetWindow(QWidget):
     hook_config_requested = Signal()
     pet_tapped = Signal()
     question_answered = Signal(str)  # selected option label
+    waddle_completed = Signal()
 
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
@@ -85,6 +86,9 @@ class PetWindow(QWidget):
         self._belly_tap_times = []
         self._speech_popup = None
         self._last_scaled_pixmap = QPixmap()
+        self._waddle_move_timer = QTimer(self)
+        self._waddle_move_timer.timeout.connect(self._waddle_tick)
+        self._waddle_anim = {}
 
     def _disable_windows_shadow(self):
         """Strip every DWM decoration Windows 11 still draws around frameless
@@ -237,6 +241,8 @@ class PetWindow(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
+            self._waddle_move_timer.stop()
+            self._waddle_anim = {}
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self._left_down = True
             self._dragging = False
@@ -399,6 +405,104 @@ class PetWindow(QWidget):
             except RuntimeError:
                 pass
             self._speech_popup = None
+
+    # --- Waddle to center ---
+    _WADDLE_ACTIVE_MOVE_S = 4.5       # total active movement time (excluding pauses)
+    _WADDLE_INTERVAL_MS = 16
+    _WADDLE_FREQ_HZ = 1.8
+    _WADDLE_AMPLITUDE_PX = 18.0
+    _WADDLE_ROTATION_DEG = 8.0
+    _WADDLE_PAUSE_MIN_S = 0.3
+    _WADDLE_PAUSE_MAX_S = 1.0
+    _WADDLE_BURST_MIN = 0.06           # min progress per move burst
+    _WADDLE_BURST_MAX = 0.18           # max progress per move burst
+
+    def start_waddle(self):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        geom = screen.availableGeometry()
+        target_x = geom.x() + (geom.width() - self.width()) // 2
+        target_y = geom.y() + (geom.height() - self.height()) // 2
+
+        import random
+        rng = random.Random()
+        first_pause = rng.uniform(self._WADDLE_BURST_MIN, self._WADDLE_BURST_MAX)
+
+        now = time.monotonic()
+        self._waddle_anim = {
+            "start_x": self.x(),
+            "start_y": self.y(),
+            "target_x": target_x,
+            "target_y": target_y,
+            "progress": 0.0,
+            "active_elapsed": 0.0,
+            "paused_until": 0.0,
+            "next_pause_at": first_pause,
+            "move_speed": 1.0 / self._WADDLE_ACTIVE_MOVE_S,
+            "last_tick": now,
+        }
+        self._waddle_move_timer.start(self._WADDLE_INTERVAL_MS)
+
+    def _waddle_tick(self):
+        state = self._waddle_anim
+        if not state:
+            self._waddle_move_timer.stop()
+            return
+
+        now = time.monotonic()
+        dt = now - state["last_tick"]
+        state["last_tick"] = now
+
+        # --- paused: hold position with subtle idle sway ---
+        if now < state["paused_until"]:
+            idle_phase = now * 1.2 * 2 * math.pi
+            self._sway_angle = math.sin(idle_phase) * 2.5
+            self._apply_label_pixmap()
+            return
+
+        # --- moving ---
+        state["active_elapsed"] += dt
+        state["progress"] += state["move_speed"] * dt
+
+        if state["progress"] >= 1.0:
+            self.move(state["target_x"], state["target_y"])
+            self._sway_angle = 0.0
+            self._apply_label_pixmap()
+            self._waddle_move_timer.stop()
+            self._waddle_anim = {}
+            self.waddle_completed.emit()
+            return
+
+        # --- decide whether to pause ---
+        if state["progress"] >= state["next_pause_at"] and state["progress"] < 0.92:
+            import random
+            rng = random.Random()
+            state["paused_until"] = now + rng.uniform(
+                self._WADDLE_PAUSE_MIN_S, self._WADDLE_PAUSE_MAX_S
+            )
+            state["next_pause_at"] = min(
+                state["progress"] + rng.uniform(self._WADDLE_BURST_MIN, self._WADDLE_BURST_MAX),
+                0.98,
+            )
+            return
+
+        # --- move with wobble ---
+        t = state["progress"]
+        if t < 0.5:
+            ease = 2.0 * t * t
+        else:
+            ease = -1.0 + (4.0 - 2.0 * t) * t
+
+        cur_x = state["start_x"] + (state["target_x"] - state["start_x"]) * ease
+        cur_y = state["start_y"] + (state["target_y"] - state["start_y"]) * ease
+
+        decay = 1.0 - t
+        wobble_phase = state["active_elapsed"] * self._WADDLE_FREQ_HZ * 2 * math.pi
+        wobble_offset = math.sin(wobble_phase) * self._WADDLE_AMPLITUDE_PX * decay
+        rotation = math.cos(wobble_phase) * self._WADDLE_ROTATION_DEG * decay
+
+        self.move(int(cur_x + wobble_offset), int(cur_y))
+        self._sway_angle = rotation
+        self._apply_label_pixmap()
 
     def contextMenuEvent(self, event):
         popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)

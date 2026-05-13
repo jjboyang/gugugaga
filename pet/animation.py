@@ -30,6 +30,8 @@ _DEFAULT_SILENCE_IDLE_MS = 25000
 
 # After this long in *idle* with no IPC / local activity → sleep (local only).
 _DEFAULT_IDLE_TO_SLEEP_MS = 20000
+# After this long in *sleep* → waddle to screen center.
+_DEFAULT_SLEEP_TO_WADDLE_MS = 20000
 
 # Rapid taps (short clicks, not drags) within this window → angry.
 _ANGRY_TAP_WINDOW_S = 1.35
@@ -52,11 +54,13 @@ STATE_CONFIG = {
     "sleep":     {"interval": 450, "loops": True},
     "angry":     {"interval": 180, "loops": False},
     "dragged":   {"interval": 280, "loops": True},
+    "waddle":    {"interval": 100, "loops": True},
 }
 
 
 class AnimationEngine(QObject):
     frame_changed = Signal(QPixmap)
+    waddle_started = Signal()
 
     def __init__(self, sprites_dir=SPRITES_DIR, parent=None):
         super().__init__(parent)
@@ -94,10 +98,17 @@ class AnimationEngine(QObject):
         self._idle_to_sleep_ms = _env_ms(
             "DESKTOP_PET_IDLE_SLEEP_MS", _DEFAULT_IDLE_TO_SLEEP_MS
         )
+        self._sleep_to_waddle_ms = _env_ms(
+            "DESKTOP_PET_SLEEP_WADDLE_MS", _DEFAULT_SLEEP_TO_WADDLE_MS
+        )
 
         self._idle_sleep_timer = QTimer(self)
         self._idle_sleep_timer.setSingleShot(True)
         self._idle_sleep_timer.timeout.connect(self._on_idle_sleep_timeout)
+
+        self._waddle_timer = QTimer(self)
+        self._waddle_timer.setSingleShot(True)
+        self._waddle_timer.timeout.connect(self._on_sleep_waddle_timeout)
 
         self._angry_done_timer = QTimer(self)
         self._angry_done_timer.setSingleShot(True)
@@ -130,6 +141,7 @@ class AnimationEngine(QObject):
             "idle": "#3498db", "question": "#f39c12", "reading": "#2ecc71",
             "thinking": "#9b59b6", "writing": "#e74c3c", "executing": "#1abc9c",
             "done": "#f1c40f", "sleep": "#5d6d7e", "angry": "#c0392b",
+            "waddle": "#2980b9",
         }
         color = QColor(colors.get(phase, "#95a5a6"))
         painter.setBrush(color)
@@ -176,13 +188,15 @@ class AnimationEngine(QObject):
                 return
             if phase == "sleep":
                 return
+            if phase == "waddle":
+                return
             return
 
         self._thinking_timer.stop()
         self._done_timer.stop()
         self._angry_done_timer.stop()
 
-        if phase not in ("idle", "sleep", "angry", "dragged"):
+        if phase not in ("idle", "sleep", "angry", "dragged", "waddle"):
             self._tap_times.clear()
 
         self.current_phase = phase
@@ -201,9 +215,19 @@ class AnimationEngine(QObject):
         else:
             self._idle_sleep_timer.stop()
 
+        if phase == "sleep":
+            if self._sleep_to_waddle_ms > 0:
+                self._waddle_timer.start(self._sleep_to_waddle_ms)
+        elif phase != "waddle":
+            self._waddle_timer.stop()
+
     def notify_user_activity(self):
         """Wake from sleep or reset the idle→sleep countdown (drag / tap)."""
+        self._waddle_timer.stop()
         if self.current_phase == "sleep":
+            self.set_state("idle")
+            return
+        if self.current_phase == "waddle":
             self.set_state("idle")
             return
         if self.current_phase == "idle":
@@ -233,6 +257,15 @@ class AnimationEngine(QObject):
     def _on_idle_sleep_timeout(self):
         if self.current_phase == "idle":
             self.set_state("sleep")
+
+    def _on_sleep_waddle_timeout(self):
+        if self.current_phase == "sleep":
+            self.set_state("waddle")
+            self.waddle_started.emit()
+
+    def on_waddle_complete(self):
+        if self.current_phase == "waddle":
+            self.set_state("idle")
 
     def _to_idle_after_angry(self):
         if self.current_phase == "angry":

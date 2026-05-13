@@ -35,6 +35,7 @@ PHASES = {
     "dragged":   {"frames": 6, "base": "aigen-dragged-v1.png"},
     "sleep":     {"frames": 10, "base": "aigen-idle-v1.png"},
     "angry":     {"frames": 8, "base": "aigen-idle-v1.png"},
+    "waddle":    {"frames": 14, "base": "aigen-idle-v1.png"},
 }
 
 ACCENT_BLUE = (70, 150, 210, 255)
@@ -230,6 +231,7 @@ OVERLAYS = {
     "dragged":   None,                # pose + AI-rendered swoosh handles it
     "sleep":     overlay_sleep,
     "angry":     overlay_angry,
+    "waddle":    None,
 }
 
 
@@ -303,6 +305,12 @@ def _motion_triplet(phase: str, frame: int, total: int) -> tuple[float, float, f
             math.sin(t * 1.1) * 2.5,
             math.sin(t * 1.6) * 3.0,
             math.sin(t * 1.5) * 5.0,
+        )
+    if phase == "waddle":
+        return (
+            math.sin(t * 1.8) * 10.0,
+            abs(math.sin(t * 1.8)) * 4.0,
+            math.sin(t * 1.8) * 8.0,
         )
     # fallback
     return (math.sin(t) * 6.0, math.sin(t) * 7.0, math.sin(t) * 8.0)

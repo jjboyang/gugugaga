@@ -61,6 +61,10 @@ def render_phase_base(phase: str, size: int = 200) -> Image.Image:
             (cx + 28 * s, cy - 62 * s, cx + 40 * s, cy - 50 * s),
             fill=(180, 210, 255, 200),
         )
+    elif phase == "waddle":
+        _draw_standard_body(draw, s, cx, cy, tilt=6, flipper_l=55, flipper_r=-55)
+        _draw_face(draw, s, cx, cy - 38 * s, eye="determined", blush=True)
+        _draw_beak(draw, s, cx, cy - 22 * s, open_slight=False)
     else:  # idle + fallback
         _draw_standard_body(draw, s, cx, cy, tilt=0, flipper_l=15, flipper_r=-15)
         _draw_face(draw, s, cx, cy - 38 * s, eye="normal", blush=True)
