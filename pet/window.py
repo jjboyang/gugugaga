@@ -85,6 +85,7 @@ class PetWindow(QWidget):
         # Belly triple-tap easter egg
         self._belly_tap_times = []
         self._speech_popup = None
+        self._question_popup = None
         self._last_scaled_pixmap = QPixmap()
         self._waddle_move_timer = QTimer(self)
         self._waddle_move_timer.timeout.connect(self._waddle_tick)
@@ -417,6 +418,12 @@ class PetWindow(QWidget):
     _WADDLE_BURST_MIN = 0.06           # min progress per move burst
     _WADDLE_BURST_MAX = 0.18           # max progress per move burst
 
+    def stop_waddle(self):
+        self._waddle_move_timer.stop()
+        self._waddle_anim = {}
+        self._sway_angle = 0.0
+        self._apply_label_pixmap()
+
     def start_waddle(self):
         screen = self.screen() or QGuiApplication.primaryScreen()
         geom = screen.availableGeometry()
@@ -665,8 +672,16 @@ class PetWindow(QWidget):
                 popup_y = avail.top()
 
         popup.move(popup_x, popup_y)
+        # Close previous question popup if still visible
+        if self._question_popup is not None:
+            try:
+                self._question_popup.close()
+            except RuntimeError:
+                pass
+        self._question_popup = popup
         popup.show()
 
     def _on_question_action(self, popup, selected):
+        self._question_popup = None
         popup.close()
         self.question_answered.emit(selected)

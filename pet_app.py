@@ -139,6 +139,7 @@ def main():
     window.pet_tapped.connect(engine.notify_pet_tap)
 
     engine.waddle_started.connect(window.start_waddle)
+    engine.waddle_cancelled.connect(window.stop_waddle)
     window.waddle_completed.connect(engine.on_waddle_complete)
 
     ipc.question_received.connect(lambda text, opts: window.show_question(text, opts))

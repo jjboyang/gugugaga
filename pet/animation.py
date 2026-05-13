@@ -61,6 +61,7 @@ STATE_CONFIG = {
 class AnimationEngine(QObject):
     frame_changed = Signal(QPixmap)
     waddle_started = Signal()
+    waddle_cancelled = Signal()
 
     def __init__(self, sprites_dir=SPRITES_DIR, parent=None):
         super().__init__(parent)
@@ -195,6 +196,9 @@ class AnimationEngine(QObject):
         self._thinking_timer.stop()
         self._done_timer.stop()
         self._angry_done_timer.stop()
+
+        if self.current_phase == "waddle" and phase != "waddle":
+            self.waddle_cancelled.emit()
 
         if phase not in ("idle", "sleep", "angry", "dragged", "waddle"):
             self._tap_times.clear()
