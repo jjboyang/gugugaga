@@ -1,8 +1,10 @@
 """Transparent, always-on-top, draggable pet window."""
 import ctypes
+import json
 import math
 import sys
 import time
+from pathlib import Path
 from PySide6.QtCore import Qt, QPoint, QTimer, Signal
 from PySide6.QtGui import (
     QGuiApplication,
@@ -13,14 +15,33 @@ from PySide6.QtGui import (
     QPixmap,
     QTransform,
 )
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton
+from PySide6.QtWidgets import (
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
+)
 
 
 # Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
-WINDOW_SIZE = 140
+DEFAULT_PET_SIZE = 140
+MIN_PET_SIZE = 80
+MAX_PET_SIZE = 300
 
 # Movement below this (logical px) counts as a tap, not a drag.
 _DRAG_COMMIT_THRESHOLD_PX = 12
+
+_CONFIG_PATH = Path.home() / ".desktop-pet-config.json"
+
+
+def _load_config():
+    try:
+        if _CONFIG_PATH.exists():
+            return json.loads(_CONFIG_PATH.read_text("utf-8"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _save_config(data):
+    _CONFIG_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
 
 class PetWindow(QWidget):
@@ -35,6 +56,11 @@ class PetWindow(QWidget):
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
         self._debug = debug
+
+        config = _load_config()
+        self._pet_size = config.get("pet_size", DEFAULT_PET_SIZE)
+        self._pet_size = max(MIN_PET_SIZE, min(MAX_PET_SIZE, self._pet_size))
+
         # On macOS, Qt.Tool maps to NSPanel which is auto-hidden when the
         # owning app loses activation. Combined with WA_ShowWithoutActivating
         # the window may never appear. Use a plain top-level window there.
@@ -47,7 +73,7 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setStyleSheet("background: transparent;")
-        self.setFixedSize(WINDOW_SIZE, WINDOW_SIZE)
+        self.setFixedSize(self._pet_size, self._pet_size)
 
         # availableGeometry() is in global coordinates; on macOS / multi-monitor
         # setups x() and y() are non-zero and must be included, otherwise the
@@ -62,11 +88,11 @@ class PetWindow(QWidget):
         )
 
         self.label = QLabel(self)
-        self.label.setFixedSize(WINDOW_SIZE, WINDOW_SIZE)
+        self.label.setFixedSize(self._pet_size, self._pet_size)
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setAttribute(Qt.WA_TranslucentBackground)
         self.label.setStyleSheet("background: transparent;")
-        self.label.setGeometry(0, 0, WINDOW_SIZE, WINDOW_SIZE)
+        self.label.setGeometry(0, 0, self._pet_size, self._pet_size)
 
         # Try to drop the Windows DWM drop-shadow that some compositors keep
         # drawing around frameless top-level windows. Best-effort; safe if it
@@ -86,7 +112,9 @@ class PetWindow(QWidget):
         self._belly_tap_times = []
         self._speech_popup = None
         self._question_popup = None
+        self._settings_popup = None
         self._last_scaled_pixmap = QPixmap()
+        self._last_original_pixmap = QPixmap()
         self._waddle_move_timer = QTimer(self)
         self._waddle_move_timer.timeout.connect(self._waddle_tick)
         self._waddle_anim = {}
@@ -212,8 +240,9 @@ class PetWindow(QWidget):
         super().paintEvent(event)
 
     def set_pixmap(self, pixmap: QPixmap):
+        self._last_original_pixmap = pixmap
         scaled = pixmap.scaled(
-            WINDOW_SIZE, WINDOW_SIZE, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            self._pet_size, self._pet_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self._last_scaled_pixmap = scaled
         self._apply_label_pixmap()
@@ -233,8 +262,8 @@ class PetWindow(QWidget):
         t.translate(-pm.width() / 2.0, -pm.height() / 2.0)
         rotated = pm.transformed(t, Qt.SmoothTransformation)
         rotated = rotated.scaled(
-            WINDOW_SIZE,
-            WINDOW_SIZE,
+            self._pet_size,
+            self._pet_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
@@ -327,7 +356,7 @@ class PetWindow(QWidget):
 
     def _check_belly_tap(self, pos):
         """Detect triple-tap on the belly area."""
-        belly_y = int(WINDOW_SIZE * self._BELLY_Y_MIN_RATIO)
+        belly_y = int(self._pet_size * self._BELLY_Y_MIN_RATIO)
         if pos.y() < belly_y:
             return
 
@@ -545,15 +574,25 @@ class PetWindow(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
 
+        settings_btn = QPushButton("设置")
+        settings_btn.setCursor(Qt.PointingHandCursor)
+        settings_btn.clicked.connect(lambda: self._on_menu_action(popup, "settings"))
+        layout.addWidget(settings_btn)
+
+        sep1 = QWidget()
+        sep1.setFixedHeight(1)
+        sep1.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
+        layout.addWidget(sep1)
+
         hook_btn = QPushButton("配置Hook")
         hook_btn.setCursor(Qt.PointingHandCursor)
         hook_btn.clicked.connect(lambda: self._on_menu_action(popup, "hook"))
         layout.addWidget(hook_btn)
 
-        sep = QWidget()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
-        layout.addWidget(sep)
+        sep2 = QWidget()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
+        layout.addWidget(sep2)
 
         quit_btn = QPushButton("退出")
         quit_btn.setCursor(Qt.PointingHandCursor)
@@ -583,10 +622,126 @@ class PetWindow(QWidget):
 
     def _on_menu_action(self, popup, action):
         popup.close()
-        if action == "hook":
+        if action == "settings":
+            self._show_settings_popup()
+        elif action == "hook":
             self.hook_config_requested.emit()
         elif action == "quit":
             self.quit_requested.emit()
+
+    def _show_settings_popup(self):
+        if self._settings_popup is not None:
+            try:
+                self._settings_popup.close()
+            except RuntimeError:
+                pass
+            self._settings_popup = None
+
+        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setAttribute(Qt.WA_ShowWithoutActivating)
+        popup.setStyleSheet("""
+            QWidget#settingsPanel {
+                background: rgba(30, 30, 30, 0.94);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 12px;
+            }
+            QLabel#settingsTitle {
+                color: #ffffff;
+                font-size: 15px;
+                font-weight: bold;
+            }
+            QLabel#sizeValue {
+                color: #cccccc;
+                font-size: 14px;
+                min-width: 40px;
+            }
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: rgba(255, 255, 255, 0.12);
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                width: 16px;
+                height: 16px;
+                margin: -5px 0;
+                background: #ffffff;
+                border-radius: 8px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(255, 255, 255, 0.25);
+                border-radius: 3px;
+            }
+        """)
+
+        panel = QWidget(popup)
+        panel.setObjectName("settingsPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("人物大小")
+        title.setObjectName("settingsTitle")
+        layout.addWidget(title)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setMinimum(MIN_PET_SIZE)
+        slider.setMaximum(MAX_PET_SIZE)
+        slider.setValue(self._pet_size)
+        slider.setPageStep(10)
+        slider.setCursor(Qt.PointingHandCursor)
+        row.addWidget(slider, 1)
+
+        value_label = QLabel(str(self._pet_size))
+        value_label.setObjectName("sizeValue")
+        row.addWidget(value_label)
+
+        layout.addLayout(row)
+
+        panel_layout = QVBoxLayout(popup)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(panel)
+
+        popup.adjustSize()
+        popup.setFixedWidth(240)
+
+        pet_geom = self.frameGeometry()
+        popup_x = pet_geom.right() + 8
+        popup_y = pet_geom.top()
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            if popup_x + popup.width() > avail.right():
+                popup_x = pet_geom.left() - popup.width() - 8
+            if popup_y + popup.height() > avail.bottom():
+                popup_y = avail.bottom() - popup.height()
+
+        popup.move(popup_x, popup_y)
+
+        def on_slider_changed(value):
+            value_label.setText(str(value))
+            self._on_size_changed(value)
+
+        slider.valueChanged.connect(on_slider_changed)
+        self._settings_popup = popup
+        popup.show()
+
+    def _on_size_changed(self, size):
+        self._pet_size = size
+        self.setFixedSize(size, size)
+        self.label.setFixedSize(size, size)
+        self.label.setGeometry(0, 0, size, size)
+        if not self._last_original_pixmap.isNull():
+            scaled = self._last_original_pixmap.scaled(
+                size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self._last_scaled_pixmap = scaled
+            self._apply_label_pixmap()
+        _save_config({"pet_size": size})
 
     def show_question(self, text, options):
         popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
