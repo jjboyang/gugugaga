@@ -1,8 +1,9 @@
 """Animation state machine and sprite frame controller."""
+import json
 import os
 import time
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QPainter, QPixmap
 
 
 SPRITES_DIR = os.path.join(os.path.dirname(__file__), "sprites")
@@ -120,6 +121,11 @@ class AnimationEngine(QObject):
         self._load_all_sprites()
 
     def _load_all_sprites(self):
+        atlas_path = os.path.join(self.sprites_dir, "atlas.json")
+        if os.path.isfile(atlas_path):
+            self.frames = self._load_sprite_atlas(atlas_path)
+            return
+
         for phase in STATE_CONFIG:
             phase_dir = os.path.join(self.sprites_dir, phase)
             pixmaps = []
@@ -131,6 +137,51 @@ class AnimationEngine(QObject):
             if not pixmaps:
                 pixmaps = [self._fallback_pixmap(phase)]
             self.frames[phase] = pixmaps
+
+    def _load_sprite_atlas(self, manifest_path):
+        """Read explicit single-character crops and align their body anchors.
+
+        A shared canvas, scale and foot baseline keep changing poses in place.
+        Directory-based characters continue to use the existing PNG loader.
+        """
+        with open(manifest_path, encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+        atlas = QPixmap(os.path.join(self.sprites_dir, manifest["image"]))
+        if atlas.isNull():
+            raise ValueError(f"Cannot load sprite atlas: {manifest_path}")
+
+        width, height = manifest["canvas_size"]
+        scale = manifest["scale"]
+        baseline = manifest["baseline"]
+        if width <= 0 or height <= 0 or scale <= 0:
+            raise ValueError("Sprite atlas canvas and scale must be positive")
+
+        cells = []
+        for frame in manifest["frames"]:
+            rect = QRect(*frame["rect"])
+            if rect.isEmpty() or not atlas.rect().contains(rect):
+                raise ValueError("Sprite atlas frame lies outside its image")
+            anchor_x, anchor_y = frame["anchor"]
+            canvas = QPixmap(width, height)
+            canvas.fill(Qt.transparent)
+            painter = QPainter(canvas)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.translate(width / 2, baseline)
+            painter.scale(scale, scale)
+            painter.drawPixmap(QPointF(-anchor_x, -anchor_y), atlas.copy(rect))
+            painter.end()
+            cells.append(canvas)
+
+        frames = {}
+        for phase in STATE_CONFIG:
+            indices = manifest["phases"].get(phase, [])
+            if not indices or any(
+                not isinstance(index, int) or not 0 <= index < len(cells)
+                for index in indices
+            ):
+                raise ValueError(f"Invalid sprite atlas frames for phase: {phase}")
+            frames[phase] = [cells[index] for index in indices]
+        return frames
 
     def _fallback_pixmap(self, phase):
         """Generate a 150x150 solid-color placeholder."""
