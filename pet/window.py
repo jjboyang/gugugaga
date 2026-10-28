@@ -49,6 +49,7 @@ class PetWindow(QWidget):
     drag_started = Signal()
     drag_ended = Signal()
     hook_config_requested = Signal()
+    character_switch_requested = Signal()
     pet_tapped = Signal()
     question_answered = Signal(str)  # selected option label
     waddle_completed = Signal()
@@ -574,6 +575,11 @@ class PetWindow(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
 
+        character_btn = QPushButton("切换角色：企鹅 / 大肥鱼")
+        character_btn.setCursor(Qt.PointingHandCursor)
+        character_btn.clicked.connect(lambda: self._on_menu_action(popup, "character"))
+        layout.addWidget(character_btn)
+
         settings_btn = QPushButton("设置")
         settings_btn.setCursor(Qt.PointingHandCursor)
         settings_btn.clicked.connect(lambda: self._on_menu_action(popup, "settings"))
@@ -624,6 +630,8 @@ class PetWindow(QWidget):
         popup.close()
         if action == "settings":
             self._show_settings_popup()
+        elif action == "character":
+            self.character_switch_requested.emit()
         elif action == "hook":
             self.hook_config_requested.emit()
         elif action == "quit":

@@ -124,6 +124,20 @@ def main():
 
     window = PetWindow(debug=DEBUG)
     engine = AnimationEngine()
+    original_sprites = engine.sprites_dir
+    fish_sprites = str(PROJECT_ROOT / "pet" / "characters" / "dafeiyu")
+    selected_character = ["penguin"]
+
+    def switch_character():
+        selected_character[0] = "dafeiyu" if selected_character[0] == "penguin" else "penguin"
+        engine.sprites_dir = fish_sprites if selected_character[0] == "dafeiyu" else original_sprites
+        engine._load_all_sprites()
+        # Re-emit the first frame without changing the external IPC state.
+        engine.frame_index = 0
+        engine.frame_changed.emit(engine.frames[engine.current_phase or "idle"][0])
+
+    window.character_switch_requested.connect(switch_character)
+
     ipc = PetIPC()
     _dlog("window/engine/ipc constructed")
     _dlog("sprites loaded:", {k: len(v) for k, v in engine.frames.items()})
