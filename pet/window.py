@@ -48,6 +48,7 @@ class PetWindow(QWidget):
     quit_requested = Signal()
     drag_started = Signal()
     drag_ended = Signal()
+    drag_moved = Signal(float)
     hook_config_requested = Signal()
     character_switch_requested = Signal()
     pet_tapped = Signal()
@@ -301,7 +302,6 @@ class PetWindow(QWidget):
                 )
                 if moved >= _DRAG_COMMIT_THRESHOLD_PX:
                     self._dragging = True
-                    self._last_global_pos = cur
                     try:
                         self.grabMouse()
                     except Exception:
@@ -339,6 +339,7 @@ class PetWindow(QWidget):
 
             self.move(cur - self._drag_offset)
             self._apply_label_pixmap()
+            self.drag_moved.emit(self._sway_angle)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:

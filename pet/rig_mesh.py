@@ -182,7 +182,9 @@ class OriginalMeshRenderer:
                         max(p.x(), q.x(), r.x()) - min(p.x(), q.x(), r.x()),
                         max(p.y(), q.y(), r.y()) - min(p.y(), q.y(), r.y()),
                     ).adjusted(-1, -1, 1, 1)
-                    active = rect.intersects(self._content_rect)
+                    # Sleep's ZZZ and the lifted pose extend beyond idle's
+                    # bounds. Keep the complete shared mesh for every texture.
+                    active = True
                     self._triangle_sources.append((p.x(), p.y(), u1, v1, u2, v2, determinant, rect, active))
 
     def transforms(self, pose):

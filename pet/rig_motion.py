@@ -29,6 +29,8 @@ class RigPose:
     angry: float = 0.0
     mouth_open: float = 0.0
     mouth_surprised: float = 0.0
+    sleep_blend: float = 0.0
+    drag_blend: float = 0.0
 
 
 _BONES = (
@@ -43,6 +45,7 @@ _CHANNELS = tuple(item.name for item in fields(NodePose))
 _FACE_DEFAULTS = {
     "eye_open": 1.0, "gaze_x": 0.0, "gaze_y": 0.0,
     "angry": 0.0, "mouth_open": 0.0, "mouth_surprised": 0.0,
+    "sleep_blend": 0.0, "drag_blend": 0.0,
 }
 
 
@@ -107,6 +110,20 @@ class RigMotion:
         self._face = {name: _Spring(value) for name, value in _FACE_DEFAULTS.items()}
         if self._phase == "sleep":
             self._face["eye_open"].value = 0.0
+            self._face["sleep_blend"].value = 1.0
+        elif self._phase == "dragged":
+            self._face["drag_blend"].value = 1.0
+
+    def begin_drag(self):
+        """Show the picked-up drawing on the input event, before timer ticks."""
+        for name, value in (("drag_blend", 1.0), ("sleep_blend", 0.0), ("eye_open", 1.0)):
+            self._face[name].value = value
+            self._face[name].velocity = 0.0
+
+    def end_drag(self):
+        """Restore the released pose while keeping all bone spring momentum."""
+        self._face["drag_blend"].value = 0.0
+        self._face["drag_blend"].velocity = 0.0
 
     def tap(self):
         """Add a bounded physical impulse; rapid taps cannot accumulate energy."""
@@ -204,8 +221,11 @@ class RigMotion:
             right.angle = -10.0 - 5.0 * wave(1.7)
             face["mouth_open"] = 0.30 + 0.22 * greeting
         elif phase == "sleep":
-            head.angle = 4.3 + 0.35 * wave(0.14)
-            head.dy += 1.7
+            face["sleep_blend"] = 1.0
+            # The original sleep drawing already bows its head. Only breathe
+            # around that pose so its ZZZ stays clear of the canvas edge.
+            head.angle = 0.35 * wave(0.14)
+            head.dy += 0.8
             body.sy = 0.996 + 0.013 * breath
             body.sx = 1.004 - 0.006 * breath
             root.dy = 1.0 - 0.5 * breath
@@ -221,11 +241,13 @@ class RigMotion:
             face["eye_open"] = 0.80
             face["mouth_open"] = 0.22
         elif phase == "dragged":
+            face["drag_blend"] = 1.0
             # Keep the original wide sitting silhouette clear of the canvas
             # edge, even at the window's maximum drag velocity.
             root.angle = drag_angle * (0.25 if self.reduced_motion else 0.40)
-            body.sy += 0.017
-            body.sx -= 0.009
+            body.sy += 0.035
+            body.sx -= 0.015
+            root.dy -= 2.5 * motion
             left.angle = -10.0 - drag_angle * 0.09
             right.angle = 10.0 - drag_angle * 0.09
             nodes["leg_left"].angle = -3.0 + 1.5 * wave(0.8)
@@ -293,7 +315,14 @@ class RigMotion:
                 setattr(node, channel, value)
             result.nodes[bone] = node
         for name, target in face_targets.items():
-            frequency = 38.0 if name == "eye_open" else 15.0
+            if name == "drag_blend":
+                frequency = 60.0
+            elif name == "sleep_blend":
+                frequency = 28.0
+            elif name == "eye_open":
+                frequency = 38.0
+            else:
+                frequency = 15.0
             value = self._face[name].advance(target, dt, frequency)
             setattr(result, name, _clamp(value, -1.0 if name.startswith("gaze_") else 0.0, 1.0))
         return result

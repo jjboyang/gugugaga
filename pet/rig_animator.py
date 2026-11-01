@@ -19,6 +19,10 @@ class RigRenderer(OriginalMeshRenderer):
 
     def __init__(self, asset_dir):
         super().__init__(asset_dir)
+        # These are the character's actual sleeping and suspended poses. The
+        # happy closed-eye idle frame below is only a blink, not a sleep pose.
+        self._sleeping = self._frame(self.manifest["phases"]["sleep"][0])
+        self._dragged = self._frame(self.manifest["phases"]["dragged"][0])
         self._closed_eyes = self._frame(1)
         eye_mask = QPixmap(*self.size)
         eye_mask.fill(Qt.transparent)
@@ -79,7 +83,7 @@ class RigRenderer(OriginalMeshRenderer):
         painter.end()
         return result
 
-    def _texture_for_pose(self, pose):
+    def _awake_texture(self, pose):
         blink = max(0.0, min(1.0, 1.0 - pose.eye_open))
         book = pose.nodes.get("book", NodePose(opacity=0)).opacity
         if blink < 0.0001 and book < 0.0001:
@@ -92,6 +96,37 @@ class RigRenderer(OriginalMeshRenderer):
         if book >= 0.0001:
             painter.setOpacity(max(0.0, min(1.0, book)))
             painter.drawPixmap(0, 0, self._book)
+        painter.end()
+        return result
+
+    def _texture_for_pose(self, pose):
+        sleeping = max(0.0, min(1.0, getattr(pose, "sleep_blend", 0.0)))
+        dragged = max(0.0, min(1.0, getattr(pose, "drag_blend", 0.0)))
+        # Select the exact source drawing once a pose settles. In particular,
+        # neither the blink's smiling eyes nor a lingering book overlays sleep
+        # or dragging. A held pet has priority while waking from sleep.
+        if dragged >= 0.995:
+            return self._dragged
+        if sleeping >= 0.995 and dragged < 0.0001:
+            return self._sleeping
+        if sleeping < 0.0001 and dragged < 0.0001:
+            return self._awake_texture(pose)
+
+        # A short transition keeps the original character artwork intact.
+        # Premultiplied additive weighting avoids leaving the idle silhouette
+        # underneath transparent regions of the sleeping/suspended drawings.
+        result = QPixmap(*self.size)
+        result.fill(Qt.transparent)
+        painter = QPainter(result)
+        painter.setCompositionMode(QPainter.CompositionMode_Plus)
+        for texture, weight in (
+            (self.base_pixmap, (1.0 - dragged) * (1.0 - sleeping)),
+            (self._sleeping, (1.0 - dragged) * sleeping),
+            (self._dragged, dragged),
+        ):
+            if weight >= 0.0001:
+                painter.setOpacity(weight)
+                painter.drawPixmap(0, 0, texture)
         painter.end()
         return result
 
@@ -135,6 +170,24 @@ class RigAnimator(QObject):
         if self.enabled:
             self.motion.tap()
 
+    def notify_drag_started(self):
+        if self.enabled:
+            self.motion.begin_drag()
+            self._last_tick = time.monotonic()
+            self._paint(0.0)
+
+    def notify_drag_ended(self):
+        if self.enabled:
+            self.motion.end_drag()
+            self._last_tick = time.monotonic()
+            self._paint(0.0)
+
+    def notify_drag_motion(self, angle=0.0):
+        # Input-driven rendering also works when a busy stream of mouse
+        # events delays a timer callback. Bound work on high-rate mice.
+        if self.enabled and (self._last_tick is None or time.monotonic() - self._last_tick >= 1 / 90):
+            self._tick()
+
     def _tick(self):
         if not self.enabled:
             return
@@ -149,7 +202,7 @@ class RigAnimator(QObject):
         # Distant cursors still produce only a small, smoothly damped glance.
         distance = max(150.0, self.window.width() * 2.5)
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
-        phase = self.engine.current_phase or "idle"
+        phase = "dragged" if getattr(self.window, "_dragging", False) else self.engine.current_phase or "idle"
         angle = getattr(self.window, "_sway_angle", 0.0)
         pose = self.motion.step(elapsed, phase, drag_angle=angle, pointer=pointer)
         # A 512px logical canvas already covers the maximum 300px window at

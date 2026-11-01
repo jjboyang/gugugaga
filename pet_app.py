@@ -174,7 +174,10 @@ def main():
 
     window.drag_started.connect(engine.notify_user_activity)
     window.drag_started.connect(engine.begin_drag)
+    window.drag_started.connect(rig.notify_drag_started)
     window.drag_ended.connect(engine.end_drag)
+    window.drag_ended.connect(rig.notify_drag_ended)
+    window.drag_moved.connect(rig.notify_drag_motion)
     window.pet_tapped.connect(engine.notify_pet_tap)
     window.pet_tapped.connect(
         lambda: rig.notify_tap() if selected_character[0] == "dafeiyu" else None
