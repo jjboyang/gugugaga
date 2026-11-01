@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "mode": "original_art_mesh",
+  "source": "../atlas.json",
+  "mesh_columns": 16,
+  "mesh_rows": 16,
+  "description": "Original sitting artwork, shared-vertex skeletal mesh. No redrawn replacement character."
+}

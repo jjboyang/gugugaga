@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from pet.window import PetWindow
 from pet.animation import AnimationEngine
 from pet.ipc import PetIPC
+from pet.rig_animator import RigAnimator
 
 
 DEBUG = os.environ.get("PET_DEBUG") == "1"
@@ -123,18 +124,41 @@ def main():
     _dlog("QApplication ready")
 
     window = PetWindow(debug=DEBUG)
+    # Keep idle/sleep and interactions, but never walk to the screen centre.
+    os.environ["DESKTOP_PET_SLEEP_WADDLE_MS"] = "0"
     engine = AnimationEngine()
     original_sprites = engine.sprites_dir
     fish_sprites = str(PROJECT_ROOT / "pet" / "characters" / "dafeiyu")
-    selected_character = ["penguin"]
+    selected_character = ["dafeiyu"]
+    engine.sprites_dir = fish_sprites
+    engine._load_all_sprites()
+
+    rig = RigAnimator(
+        engine, window,
+        PROJECT_ROOT / "pet" / "characters" / "dafeiyu" / "rig",
+        parent=app,
+    )
+    rig.frame_changed.connect(window.set_pixmap)
+    window._rig_handles_sway = True
+
+    def show_sprite_frame(pixmap):
+        # The state machine still advances its logical animation timers for
+        # both characters; only the penguin displays its original sprite frames.
+        if selected_character[0] == "penguin":
+            window.set_pixmap(pixmap)
 
     def switch_character():
+        rig.set_enabled(False)
         selected_character[0] = "dafeiyu" if selected_character[0] == "penguin" else "penguin"
         engine.sprites_dir = fish_sprites if selected_character[0] == "dafeiyu" else original_sprites
         engine._load_all_sprites()
-        # Re-emit the first frame without changing the external IPC state.
         engine.frame_index = 0
-        engine.frame_changed.emit(engine.frames[engine.current_phase or "idle"][0])
+        window._rig_handles_sway = selected_character[0] == "dafeiyu"
+        if selected_character[0] == "dafeiyu":
+            rig.set_enabled(True)
+        else:
+            # Refresh immediately without changing the external IPC state.
+            show_sprite_frame(engine.frames[engine.current_phase or "idle"][0])
 
     window.character_switch_requested.connect(switch_character)
 
@@ -143,14 +167,18 @@ def main():
     _dlog("sprites loaded:", {k: len(v) for k, v in engine.frames.items()})
 
     app.aboutToQuit.connect(ipc.stop)
+    app.aboutToQuit.connect(rig.stop)
 
     ipc.phase_changed.connect(engine.set_state)
-    engine.frame_changed.connect(window.set_pixmap)
+    engine.frame_changed.connect(show_sprite_frame)
 
     window.drag_started.connect(engine.notify_user_activity)
     window.drag_started.connect(engine.begin_drag)
     window.drag_ended.connect(engine.end_drag)
     window.pet_tapped.connect(engine.notify_pet_tap)
+    window.pet_tapped.connect(
+        lambda: rig.notify_tap() if selected_character[0] == "dafeiyu" else None
+    )
 
     engine.waddle_started.connect(window.start_waddle)
     engine.waddle_cancelled.connect(window.stop_waddle)
@@ -193,6 +221,7 @@ def main():
 
     ipc.start()
     engine.set_state("idle")
+    rig.set_enabled(True)
     window.show()
     window.raise_()
     window.activateWindow()

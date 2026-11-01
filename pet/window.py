@@ -109,6 +109,9 @@ class PetWindow(QWidget):
         # Smoothed horizontal drag velocity → pendulum-like sway angle (degrees).
         self._sway_velocity_smooth = 0.0
         self._sway_angle = 0.0
+        # Layered characters handle sway in their individual bones. Sprite
+        # characters retain the original whole-image drag rotation below.
+        self._rig_handles_sway = False
         # Belly triple-tap easter egg
         self._belly_tap_times = []
         self._speech_popup = None
@@ -242,9 +245,12 @@ class PetWindow(QWidget):
 
     def set_pixmap(self, pixmap: QPixmap):
         self._last_original_pixmap = pixmap
+        dpr = max(1.0, self.devicePixelRatioF())
+        physical_size = round(self._pet_size * dpr)
         scaled = pixmap.scaled(
-            self._pet_size, self._pet_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            physical_size, physical_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
+        scaled.setDevicePixelRatio(dpr)
         self._last_scaled_pixmap = scaled
         self._apply_label_pixmap()
 
@@ -254,7 +260,7 @@ class PetWindow(QWidget):
         if pm.isNull():
             return
         # During drag, apply rotation once tilt exceeds ~0.25° (below that looks flat).
-        if not self._dragging or abs(self._sway_angle) < 0.25:
+        if self._rig_handles_sway or not self._dragging or abs(self._sway_angle) < 0.25:
             self.label.setPixmap(pm)
             return
         t = QTransform()
@@ -262,12 +268,15 @@ class PetWindow(QWidget):
         t.rotate(self._sway_angle)
         t.translate(-pm.width() / 2.0, -pm.height() / 2.0)
         rotated = pm.transformed(t, Qt.SmoothTransformation)
+        dpr = pm.devicePixelRatioF()
+        physical_size = round(self._pet_size * dpr)
         rotated = rotated.scaled(
-            self._pet_size,
-            self._pet_size,
+            physical_size,
+            physical_size,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
+        rotated.setDevicePixelRatio(dpr)
         self.label.setPixmap(rotated)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -744,9 +753,12 @@ class PetWindow(QWidget):
         self.label.setFixedSize(size, size)
         self.label.setGeometry(0, 0, size, size)
         if not self._last_original_pixmap.isNull():
+            dpr = max(1.0, self.devicePixelRatioF())
+            physical_size = round(size * dpr)
             scaled = self._last_original_pixmap.scaled(
-                size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                physical_size, physical_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
+            scaled.setDevicePixelRatio(dpr)
             self._last_scaled_pixmap = scaled
             self._apply_label_pixmap()
         _save_config({"pet_size": size})
