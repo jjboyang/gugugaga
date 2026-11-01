@@ -120,7 +120,13 @@ class OriginalMeshRenderer:
             rows = self.rig_manifest.get("mesh_rows", 16)
             if any(not isinstance(v, int) or not 4 <= v <= 32 for v in (columns, rows)):
                 raise ValueError("Mesh rows and columns must be integers from 4 to 32")
-        except (OSError, ValueError) as exc:
+            anchor = self.rig_manifest.get("suspension_anchor", [257.0, 72.0])
+            if len(anchor) != 2 or any(not math.isfinite(float(v)) for v in anchor):
+                raise ValueError("Invalid suspension anchor")
+            self.suspension_anchor = tuple(float(v) for v in anchor)
+            if any(v < 0 or v > extent for v, extent in zip(self.suspension_anchor, self.size)):
+                raise ValueError("Suspension anchor lies outside the canvas")
+        except (OSError, TypeError, ValueError) as exc:
             raise ValueError(f"Cannot load DaFeiYu mesh configuration: {exc}") from exc
         self._make_grid(columns, rows)
 
@@ -190,6 +196,7 @@ class OriginalMeshRenderer:
     def transforms(self, pose):
         """Return bone-origin world transforms and inherited opacity, as before."""
         result = {}
+        suspension = max(0.0, min(1.0, getattr(pose, "suspension", 0.0)))
 
         def resolve(name):
             if name in result:
@@ -200,9 +207,20 @@ class OriginalMeshRenderer:
             node = pose.nodes.get(name, NodePose())
             x, y = bone["position"]
             transform = QTransform(parent_transform)
-            transform.translate(x + node.dx, y + node.dy)
-            transform.rotate(node.angle)
-            transform.scale(node.sx, node.sy)
+            if name == "root" and suspension > 0:
+                # Keep all bind positions unchanged while rotating the same
+                # skeleton about its grip instead of about the resting feet.
+                anchor_x, anchor_y = self.suspension_anchor
+                pivot_x = x + (anchor_x - x) * suspension
+                pivot_y = y + (anchor_y - y) * suspension
+                transform.translate(pivot_x + node.dx, pivot_y + node.dy)
+                transform.rotate(node.angle)
+                transform.scale(node.sx, node.sy)
+                transform.translate(x - pivot_x, y - pivot_y)
+            else:
+                transform.translate(x + node.dx, y + node.dy)
+                transform.rotate(node.angle)
+                transform.scale(node.sx, node.sy)
             result[name] = transform, opacity * node.opacity
             return result[name]
 
@@ -216,9 +234,9 @@ class OriginalMeshRenderer:
 
     def deformed_vertices(self, pose):
         """Expose the shared skinned vertices for rig editors and validation."""
-        return self._deformed_vertices(self.transforms(pose))
+        return self._deformed_vertices(self.transforms(pose), pose)
 
-    def _deformed_vertices(self, transforms):
+    def _deformed_vertices(self, transforms, pose=None):
         vertices = []
         for point, weights in zip(self.vertices, self.weights):
             x = y = 0.0
@@ -228,7 +246,35 @@ class OriginalMeshRenderer:
                 x += transformed.x() * weight
                 y += transformed.y() * weight
             vertices.append(QPointF(x, y))
+        suspension = max(0.0, min(1.0, getattr(pose, "suspension", 0.0)))
+        if suspension > 0:
+            # Pin the actual *painted triangle*, not just a theoretical bone
+            # point: breathing/head springs must not pull cloth off the fingers.
+            triangle, barycentric = self._grip_triangle()
+            actual_x = sum(weight * vertices[index].x() for index, weight in zip(triangle, barycentric))
+            actual_y = sum(weight * vertices[index].y() for index, weight in zip(triangle, barycentric))
+            dx = (self.suspension_anchor[0] - actual_x) * suspension
+            dy = (self.suspension_anchor[1] - actual_y) * suspension
+            vertices = [QPointF(point.x() + dx, point.y() + dy) for point in vertices]
         return vertices
+
+    def _grip_triangle(self):
+        cached = getattr(self, "_grip_triangle_cache", None)
+        if cached is not None and cached[0] == self.suspension_anchor:
+            return cached[1], cached[2]
+        x, y = self.suspension_anchor
+        for triangle in self.triangles:
+            a, b, c = (self.vertices[index] for index in triangle)
+            determinant = ((b.y() - c.y()) * (a.x() - c.x())
+                           + (c.x() - b.x()) * (a.y() - c.y()))
+            wa = ((b.y() - c.y()) * (x - c.x()) + (c.x() - b.x()) * (y - c.y())) / determinant
+            wb = ((c.y() - a.y()) * (x - c.x()) + (a.x() - c.x()) * (y - c.y())) / determinant
+            wc = 1.0 - wa - wb
+            if min(wa, wb, wc) >= -1e-9:
+                barycentric = (wa, wb, wc)
+                self._grip_triangle_cache = self.suspension_anchor, triangle, barycentric
+                return triangle, barycentric
+        raise ValueError("Suspension anchor has no painted mesh triangle")
 
     def render(self, pose: RigPose, scale=1.0):
         scale = float(scale)
@@ -242,7 +288,7 @@ class OriginalMeshRenderer:
             return image
         texture = self._texture_for_pose(pose)
         transforms = self.transforms(pose)
-        vertices = self._deformed_vertices(transforms)
+        vertices = self._deformed_vertices(transforms, pose)
         neutral = all(
             abs(a.x() - b.x()) < 1e-8 and abs(a.y() - b.y()) < 1e-8
             for a, b in zip(self.vertices, vertices)

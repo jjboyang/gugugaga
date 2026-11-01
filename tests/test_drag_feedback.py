@@ -4,7 +4,6 @@ Use main()'s actual signal wiring: a phase-only test misses a pet that moves
 with the pointer while its displayed picture is still the idle picture.
 """
 import os
-from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -111,13 +110,18 @@ class DragFeedbackTests(unittest.TestCase):
     def assert_pickup_picture(self):
         displayed = self.window.label.pixmap().toImage()
         renderer = self.rig.renderer
-        index = renderer.manifest["phases"]["dragged"][0]
         size = self.window._pet_size
-        reference = renderer._frame(index).scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation).toImage()
+        # Compare with the approved hanging drawing, including the fixed grip
+        # hand. The old atlas gesture raises both arms and is no longer the
+        # expected picture when the dedicated pickup asset is installed.
+        source = getattr(renderer, "_pickup_complete", None)
+        if source is None or source.isNull():
+            source = renderer._frame(renderer.manifest["phases"]["dragged"][0])
+        reference = source.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation).toImage()
         idle = renderer.base_pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation).toImage()
         self.assertLess(
             image_error(displayed, reference), image_error(displayed, idle),
-            "Holding a drag must visibly show the original pickup gesture, even at zero velocity",
+            "Holding a drag must visibly show the hanging pickup gesture, even at zero velocity",
         )
 
     def test_first_committed_drag_repaints_before_another_timer_event(self):

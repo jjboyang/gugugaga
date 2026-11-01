@@ -31,6 +31,7 @@ class RigPose:
     mouth_surprised: float = 0.0
     sleep_blend: float = 0.0
     drag_blend: float = 0.0
+    suspension: float = 0.0
 
 
 _BONES = (
@@ -46,6 +47,7 @@ _FACE_DEFAULTS = {
     "eye_open": 1.0, "gaze_x": 0.0, "gaze_y": 0.0,
     "angry": 0.0, "mouth_open": 0.0, "mouth_surprised": 0.0,
     "sleep_blend": 0.0, "drag_blend": 0.0,
+    "suspension": 0.0,
 }
 
 
@@ -81,6 +83,31 @@ class _Spring:
         return self.value
 
 
+class _Pendulum(_Spring):
+    """Exact underdamped angular spring: a held body can swing past vertical."""
+
+    def advance(self, target, dt, frequency):
+        if dt <= 0:
+            return self.value
+        damping = 0.48
+        decay_rate = damping * frequency
+        if dt * decay_rate > 60:
+            self.value, self.velocity = target, 0.0
+            return target
+        damped_frequency = frequency * math.sqrt(1.0 - damping * damping)
+        offset = self.value - target
+        quadrature = (self.velocity + decay_rate * offset) / damped_frequency
+        phase = damped_frequency * dt
+        sine, cosine = math.sin(phase), math.cos(phase)
+        decay = math.exp(-decay_rate * dt)
+        self.value = target + decay * (offset * cosine + quadrature * sine)
+        self.velocity = decay * (
+            (-decay_rate * offset + damped_frequency * quadrature) * cosine
+            + (-decay_rate * quadrature - damped_frequency * offset) * sine
+        )
+        return self.value
+
+
 class RigMotion:
     """Produce smooth poses without owning a timer, GUI, or state machine.
 
@@ -102,21 +129,30 @@ class RigMotion:
         self._tap_elapsed = 100.0
         self._blink_start = None
         self._next_blink = self._random.uniform(2.2, 4.5)
+        self._drag_event_driven = False
+        self._last_drag_event = 0.0
+        self._drag_event_angle = 0.0
         self._springs = {}
         for bone in _BONES:
             default = NodePose(opacity=0.0 if bone == "book" else 1.0)
             for channel in _CHANNELS:
                 self._springs[(bone, channel)] = _Spring(getattr(default, channel))
+        self._springs[("root", "angle")] = _Pendulum(0.0)
         self._face = {name: _Spring(value) for name, value in _FACE_DEFAULTS.items()}
         if self._phase == "sleep":
             self._face["eye_open"].value = 0.0
             self._face["sleep_blend"].value = 1.0
         elif self._phase == "dragged":
             self._face["drag_blend"].value = 1.0
+            self._face["suspension"].value = 1.0
 
     def begin_drag(self):
         """Show the picked-up drawing on the input event, before timer ticks."""
-        for name, value in (("drag_blend", 1.0), ("sleep_blend", 0.0), ("eye_open", 1.0)):
+        self._drag_event_driven = True
+        self._last_drag_event = self._time
+        self._drag_event_angle = 0.0
+        for name, value in (("drag_blend", 1.0), ("sleep_blend", 0.0),
+                            ("eye_open", 1.0), ("suspension", 1.0)):
             self._face[name].value = value
             self._face[name].velocity = 0.0
 
@@ -124,6 +160,14 @@ class RigMotion:
         """Restore the released pose while keeping all bone spring momentum."""
         self._face["drag_blend"].value = 0.0
         self._face["drag_blend"].velocity = 0.0
+        self._drag_event_driven = False
+
+    def note_drag_motion(self, angle):
+        """Record fresh input separately from timer samples of an old angle."""
+        angle = float(angle)
+        self._drag_event_angle = _clamp(angle, -26.0, 26.0) if math.isfinite(angle) else 0.0
+        self._last_drag_event = self._time
+        self._drag_event_driven = True
 
     def tap(self):
         """Add a bounded physical impulse; rapid taps cannot accumulate energy."""
@@ -242,16 +286,18 @@ class RigMotion:
             face["mouth_open"] = 0.22
         elif phase == "dragged":
             face["drag_blend"] = 1.0
-            # Keep the original wide sitting silhouette clear of the canvas
-            # edge, even at the window's maximum drag velocity.
-            root.angle = drag_angle * (0.25 if self.reduced_motion else 0.40)
-            body.sy += 0.035
-            body.sx -= 0.015
-            root.dy -= 2.5 * motion
-            left.angle = -10.0 - drag_angle * 0.09
-            right.angle = 10.0 - drag_angle * 0.09
-            nodes["leg_left"].angle = -3.0 + 1.5 * wave(0.8)
-            nodes["leg_right"].angle = 3.0 + 1.5 * wave(0.8, 0.8)
+            face["suspension"] = 1.0
+            # In Qt's y-down coordinates a clockwise rotation about the grip
+            # makes the body below it lag left during a rightward mouse move.
+            root.angle = drag_angle * (0.12 if self.reduced_motion else 0.25)
+            root.dx = root.dy = 0.0
+            body.dx = body.dy = head.dx = head.dy = 0.0
+            body.sx = body.sy = 1.0
+            head.angle = 0.0
+            swinging = self._springs[("root", "angle")].value
+            left.angle = right.angle = 0.30 * swinging
+            nodes["leg_left"].angle = 0.42 * swinging
+            nodes["leg_right"].angle = 0.48 * swinging
             face["mouth_surprised"] = 0.55
             face["mouth_open"] = 0.24
         elif phase == "waddle":
@@ -266,13 +312,15 @@ class RigMotion:
         # Hair follows the *actual* head angle through slower springs rather
         # than mirroring its target; this creates secondary motion and lag.
         head_angle = self._springs[("head", "angle")].value
-        drag_lag = drag_angle * 0.11 if phase == "dragged" else 0.0
-        softness = 0.4 if phase == "sleep" else 1.0
-        nodes["hair_left"].angle = -0.55 * head_angle + softness * wave(0.28) - drag_lag
-        nodes["hair_right"].angle = -0.5 * head_angle + softness * wave(0.28, -0.65) - drag_lag
+        drag_lag = self._springs[("root", "angle")].value * 0.40 if phase == "dragged" else 0.0
+        softness = 0.0 if phase == "dragged" else 0.4 if phase == "sleep" else 1.0
+        nodes["hair_left"].angle = -0.55 * head_angle + softness * wave(0.28) + drag_lag
+        nodes["hair_right"].angle = -0.5 * head_angle + softness * wave(0.28, -0.65) + drag_lag
         nodes["headdress"].angle = -0.15 * head_angle + 0.20 * wave(0.22)
+        if phase == "dragged":
+            nodes["headdress"].angle = 0.0
 
-        tap = motion * math.exp(-self._tap_elapsed * 7.0)
+        tap = 0.0 if phase == "dragged" else motion * math.exp(-self._tap_elapsed * 7.0)
         body.sy -= 0.012 * tap
         body.sx += 0.009 * tap
         head.angle += 0.8 * tap
@@ -295,6 +343,9 @@ class RigMotion:
         self._tap_elapsed = min(100.0, self._tap_elapsed + dt)
         drag_angle = float(drag_angle)
         drag_angle = _clamp(drag_angle, -26.0, 26.0) if math.isfinite(drag_angle) else 0.0
+        if phase == "dragged" and self._drag_event_driven:
+            stale = max(0.0, self._time - self._last_drag_event - 0.035)
+            drag_angle = self._drag_event_angle * math.exp(-stale * 10.0)
         gaze = tuple(_clamp(float(v), -1.0, 1.0) if math.isfinite(float(v)) else 0.0 for v in pointer)
         targets, face_targets = self._targets(phase, drag_angle, gaze)
         result = RigPose()
@@ -302,7 +353,8 @@ class RigMotion:
             node = NodePose()
             frequency = 7.0 if bone.startswith("hair_") else 13.0
             for channel in _CHANNELS:
-                value = self._springs[(bone, channel)].advance(getattr(target, channel), dt, frequency)
+                channel_frequency = 7.0 if bone == "root" and channel == "angle" else frequency
+                value = self._springs[(bone, channel)].advance(getattr(target, channel), dt, channel_frequency)
                 if channel == "opacity":
                     value = _clamp(value, 0.0, 1.0)
                 elif channel in ("sx", "sy"):
@@ -317,6 +369,8 @@ class RigMotion:
         for name, target in face_targets.items():
             if name == "drag_blend":
                 frequency = 60.0
+            elif name == "suspension":
+                frequency = 5.0
             elif name == "sleep_blend":
                 frequency = 28.0
             elif name == "eye_open":

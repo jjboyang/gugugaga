@@ -6,6 +6,7 @@ layered character inside its window; it never changes the desktop position.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPixmap, QRadialGradient
@@ -23,6 +24,39 @@ class RigRenderer(OriginalMeshRenderer):
         # happy closed-eye idle frame below is only a blink, not a sleep pose.
         self._sleeping = self._frame(self.manifest["phases"]["sleep"][0])
         self._dragged = self._frame(self.manifest["phases"]["dragged"][0])
+        self._pickup_complete = self._dragged
+        self._grip_hand = QPixmap(*self.size)
+        self._grip_hand.fill(Qt.transparent)
+        pickup_path = Path(asset_dir) / self.rig_manifest.get("pickup_image", "pickup.png")
+        if pickup_path.exists():
+            pickup = QPixmap(str(pickup_path))
+            if pickup.isNull():
+                raise ValueError(f"Cannot load pickup pose: {pickup_path}")
+            self._pickup_complete = pickup.scaled(*self.size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            # The fingers hold still while the character swings below them.
+            # A binary mask partitions the source without double alpha edges.
+            hand_mask = QPixmap(*self.size)
+            hand_mask.fill(Qt.transparent)
+            painter = QPainter(hand_mask)
+            for points in self.rig_manifest.get("pickup_hand_polygons", []):
+                if len(points) < 3:
+                    continue
+                path = QPainterPath(QPointF(*points[0]))
+                for point in points[1:]:
+                    path.lineTo(*point)
+                path.closeSubpath()
+                painter.fillPath(path, Qt.white)
+            painter.end()
+            self._grip_hand = QPixmap(self._pickup_complete)
+            painter = QPainter(self._grip_hand)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            painter.drawPixmap(0, 0, hand_mask)
+            painter.end()
+            self._dragged = QPixmap(self._pickup_complete)
+            painter = QPainter(self._dragged)
+            painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+            painter.drawPixmap(0, 0, hand_mask)
+            painter.end()
         self._closed_eyes = self._frame(1)
         eye_mask = QPixmap(*self.size)
         eye_mask.fill(Qt.transparent)
@@ -81,6 +115,17 @@ class RigRenderer(OriginalMeshRenderer):
         anchor_x, anchor_y = frame["anchor"]
         painter.drawPixmap(QPointF(-anchor_x, -anchor_y), atlas.copy(QRect(*frame["rect"])))
         painter.end()
+        return result
+
+    def render(self, pose, scale=1.0):
+        result = super().render(pose, scale=scale)
+        hand_opacity = max(0.0, min(1.0, pose.drag_blend))
+        root_opacity = pose.nodes.get("root", NodePose()).opacity
+        if hand_opacity * root_opacity > 0.0001:
+            painter = QPainter(result)
+            painter.setOpacity(hand_opacity * root_opacity)
+            painter.drawPixmap(0, 0, self._grip_hand)
+            painter.end()
         return result
 
     def _awake_texture(self, pose):
@@ -185,8 +230,10 @@ class RigAnimator(QObject):
     def notify_drag_motion(self, angle=0.0):
         # Input-driven rendering also works when a busy stream of mouse
         # events delays a timer callback. Bound work on high-rate mice.
-        if self.enabled and (self._last_tick is None or time.monotonic() - self._last_tick >= 1 / 90):
-            self._tick()
+        if self.enabled:
+            self.motion.note_drag_motion(angle)
+            if self._last_tick is None or time.monotonic() - self._last_tick >= 1 / 90:
+                self._tick()
 
     def _tick(self):
         if not self.enabled:

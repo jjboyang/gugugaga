@@ -1,4 +1,4 @@
-"""Use the original sleep/drag drawings, rather than a smiling idle blink."""
+"""Preserve original sleeping art and use the approved hanging drag drawing."""
 from __future__ import annotations
 
 import json
@@ -46,6 +46,12 @@ class OriginalStatePoseTests(unittest.TestCase):
         painter.end()
         return expected.toImage()
 
+    def approved_pickup(self):
+        complete = getattr(self.renderer, "_pickup_complete", None)
+        if complete is not None and not complete.isNull():
+            return complete.toImage()
+        return self.original_frame("dragged")
+
     @staticmethod
     def pose(*, sleeping=0.0, dragged=0.0, eye_open=1.0, book=0.0):
         pose = RigPose(nodes={"book": NodePose(opacity=book)}, eye_open=eye_open)
@@ -69,14 +75,14 @@ class OriginalStatePoseTests(unittest.TestCase):
         actual = self.renderer.render(self.pose(sleeping=1, eye_open=0, book=1)).toImage()
         self.assertEqual(actual, self.original_frame("sleep"))
 
-    def test_drag_is_the_exact_original_suspended_drawing(self):
+    def test_drag_is_the_approved_hanging_drawing(self):
         actual = self.renderer.render(self.pose(dragged=1)).toImage()
-        self.assertEqual(actual, self.original_frame("dragged"))
+        self.assertEqual(actual, self.approved_pickup())
         self.assertNotEqual(actual, self.original_frame("idle"))
 
     def test_held_pose_has_priority_when_waking_from_sleep(self):
         actual = self.renderer.render(self.pose(sleeping=1, dragged=1, eye_open=0, book=1)).toImage()
-        self.assertEqual(actual, self.original_frame("dragged"))
+        self.assertEqual(actual, self.approved_pickup())
 
     def test_return_to_idle_restores_the_unchanged_original_art(self):
         self.renderer.render(self.pose(sleeping=1))
