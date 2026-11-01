@@ -130,6 +130,7 @@ def main():
     original_sprites = engine.sprites_dir
     fish_sprites = str(PROJECT_ROOT / "pet" / "characters" / "dafeiyu")
     selected_character = ["dafeiyu"]
+    engine.angry_hold_ms = 1000
     engine.sprites_dir = fish_sprites
     engine._load_all_sprites()
 
@@ -150,6 +151,7 @@ def main():
     def switch_character():
         rig.set_enabled(False)
         selected_character[0] = "dafeiyu" if selected_character[0] == "penguin" else "penguin"
+        engine.angry_hold_ms = 1000 if selected_character[0] == "dafeiyu" else 450
         engine.sprites_dir = fish_sprites if selected_character[0] == "dafeiyu" else original_sprites
         engine._load_all_sprites()
         engine.frame_index = 0

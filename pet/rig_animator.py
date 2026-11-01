@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+import math
 
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPixmap, QRadialGradient
+from PySide6.QtGui import (
+    QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+    QRadialGradient, QTransform,
+)
 
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
@@ -99,6 +103,83 @@ class RigRenderer(OriginalMeshRenderer):
         painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         painter.drawPixmap(0, 0, book_mask)
         painter.end()
+        self._load_angry_expression()
+
+    def _load_angry_expression(self):
+        # The angry atlas frame stands up. Align only its original facial
+        # features to the seated face instead of replacing the whole character.
+        source = self._frame(self.manifest["phases"]["angry"][0])
+        source_left, source_right = (215.23, 306.38), (301.12, 298.81)
+        target_left, target_right = (215.58, 336.61), (299.44, 325.69)
+        sx, sy = (source_left[0] + source_right[0]) / 2, (source_left[1] + source_right[1]) / 2
+        tx, ty = (target_left[0] + target_right[0]) / 2, (target_left[1] + target_right[1]) / 2
+        source_angle = math.atan2(source_right[1] - source_left[1], source_right[0] - source_left[0])
+        target_angle = math.atan2(target_right[1] - target_left[1], target_right[0] - target_left[0])
+        scale = math.dist(target_left, target_right) / math.dist(source_left, source_right)
+        transform = QTransform()
+        transform.translate(tx, ty)
+        transform.rotate(math.degrees(target_angle - source_angle))
+        transform.scale(scale, scale)
+        transform.translate(-sx, -sy)
+
+        aligned = QPixmap(*self.size)
+        aligned.fill(Qt.transparent)
+        painter = QPainter(aligned)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setWorldTransform(transform)
+        painter.drawPixmap(0, 0, source)
+        painter.end()
+
+        mask = QPixmap(*self.size)
+        mask.fill(Qt.transparent)
+        painter = QPainter(mask)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        for cx, cy, width, height in ((213, 323, 40, 31), (300, 314, 40, 32), (258, 356, 19, 14)):
+            painter.save()
+            painter.translate(cx, cy)
+            painter.scale(1, height / width)
+            gradient = QRadialGradient(0, 0, width)
+            gradient.setColorAt(0, QColor(255, 255, 255, 255))
+            gradient.setColorAt(0.75, QColor(255, 255, 255, 255))
+            gradient.setColorAt(1, QColor(255, 255, 255, 0))
+            painter.setBrush(gradient)
+            painter.drawEllipse(QPointF(0, 0), width, width)
+            painter.restore()
+        painter.end()
+        self._angry_face = aligned
+        painter = QPainter(self._angry_face)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawPixmap(0, 0, mask)
+        painter.end()
+
+        # Isolate the original red anger symbol and its white rim, without
+        # bringing a second piece of hair/headband along with it.
+        image = source.toImage()
+        points = []
+        for y in range(128, 209):
+            for x in range(65, 145):
+                color = image.pixelColor(x, y)
+                if color.alpha() > 80 and color.red() > 150 and color.red() > color.green() + 65 and color.red() > color.blue() + 50:
+                    points.append(QPointF(x + 0.5, y + 0.5))
+        mark_mask = QPixmap(*self.size)
+        mark_mask.fill(Qt.transparent)
+        painter = QPainter(mark_mask)
+        painter.setPen(QPen(Qt.white, 7, Qt.SolidLine, Qt.RoundCap))
+        painter.drawPoints(QPolygonF(points))
+        painter.end()
+        mark = QPixmap(source)
+        painter = QPainter(mark)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.drawPixmap(0, 0, mark_mask)
+        painter.end()
+        self._anger_mark = QPixmap(*self.size)
+        self._anger_mark.fill(Qt.transparent)
+        painter = QPainter(self._anger_mark)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setWorldTransform(transform)
+        painter.drawPixmap(0, 0, mark)
+        painter.end()
 
     def _frame(self, index):
         source_dir = self.asset_dir.parent
@@ -129,12 +210,17 @@ class RigRenderer(OriginalMeshRenderer):
         return result
 
     def _awake_texture(self, pose):
-        blink = max(0.0, min(1.0, 1.0 - pose.eye_open))
-        book = pose.nodes.get("book", NodePose(opacity=0)).opacity
-        if blink < 0.0001 and book < 0.0001:
+        angry = max(0.0, min(1.0, pose.angry))
+        blink = max(0.0, min(1.0, 1.0 - pose.eye_open)) * (1.0 - angry)
+        book = pose.nodes.get("book", NodePose(opacity=0)).opacity * (1.0 - angry)
+        if blink < 0.0001 and book < 0.0001 and angry < 0.0001:
             return self.base_pixmap
         result = QPixmap(self.base_pixmap)
         painter = QPainter(result)
+        if angry >= 0.0001:
+            painter.setOpacity(angry)
+            painter.drawPixmap(0, 0, self._angry_face)
+            painter.drawPixmap(0, 0, self._anger_mark)
         if blink >= 0.0001:
             painter.setOpacity(blink)
             painter.drawPixmap(0, 0, self._closed_eyes)

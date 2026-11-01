@@ -117,6 +117,8 @@ class AnimationEngine(QObject):
         self._angry_done_timer.timeout.connect(self._to_idle_after_angry)
 
         self._tap_times = []
+        # Characters can hold the local angry reaction for different lengths.
+        self.angry_hold_ms = 450
 
         self._load_all_sprites()
 
@@ -378,7 +380,7 @@ class AnimationEngine(QObject):
             elif self.current_phase == "question":
                 return
             elif self.current_phase == "angry":
-                self._angry_done_timer.start(450)
+                self._angry_done_timer.start(self.angry_hold_ms)
                 return
         self._emit_frame()
 
