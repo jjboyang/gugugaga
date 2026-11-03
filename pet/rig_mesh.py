@@ -126,6 +126,10 @@ class OriginalMeshRenderer:
             self.suspension_anchor = tuple(float(v) for v in anchor)
             if any(v < 0 or v > extent for v, extent in zip(self.suspension_anchor, self.size)):
                 raise ValueError("Suspension anchor lies outside the canvas")
+            contact = self.rig_manifest.get("knock_contact", [312.0, 309.0])
+            if len(contact) != 2 or any(not math.isfinite(float(v)) or not 0 <= float(v) <= 512 for v in contact):
+                raise ValueError("Invalid knocking contact")
+            self.knock_contact = tuple(float(v) for v in contact)
         except (OSError, TypeError, ValueError) as exc:
             raise ValueError(f"Cannot load DaFeiYu mesh configuration: {exc}") from exc
         self._make_grid(columns, rows)
@@ -246,6 +250,18 @@ class OriginalMeshRenderer:
                 x += transformed.x() * weight
                 y += transformed.y() * weight
             vertices.append(QPointF(x, y))
+        if getattr(pose, "phase", "idle") == "idle" and getattr(pose, "idle_action", "") == "knock":
+            # The forward fist sits in front of the face, above the ordinary
+            # shoulder weights. Deform that small connected mesh region so a
+            # tap moves the hand itself instead of only flashing contact rings.
+            strength = max(0.0, min(1.0, pose.knock_impact * pose.knock_blend))
+            cx, cy = self.knock_contact
+            for original, point in zip(self.vertices, vertices):
+                u, v = (original.x() - cx) / 30.0, (original.y() - cy) / 34.0
+                weight = max(0.0, 1.0 - u * u - v * v) ** 2
+                if weight:
+                    point.setX(point.x() + (original.x() - cx) * 0.13 * strength * weight)
+                    point.setY(point.y() + ((original.y() - cy) * 0.13 - 8.0) * strength * weight)
         suspension = max(0.0, min(1.0, getattr(pose, "suspension", 0.0)))
         if suspension > 0:
             # Pin the actual *painted triangle*, not just a theoretical bone

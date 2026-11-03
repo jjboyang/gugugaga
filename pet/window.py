@@ -49,6 +49,7 @@ class PetWindow(QWidget):
     drag_started = Signal()
     drag_ended = Signal()
     drag_moved = Signal(float)
+    interaction_started = Signal()
     hook_config_requested = Signal()
     character_switch_requested = Signal()
     pet_tapped = Signal()
@@ -281,6 +282,8 @@ class PetWindow(QWidget):
         self.label.setPixmap(rotated)
 
     def mousePressEvent(self, event: QMouseEvent):
+        if event.button() in (Qt.LeftButton, Qt.RightButton):
+            self.interaction_started.emit()
         if event.button() == Qt.LeftButton:
             self._waddle_move_timer.stop()
             self._waddle_anim = {}

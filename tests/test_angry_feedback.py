@@ -148,13 +148,13 @@ class FourTapAngerTests(unittest.TestCase):
             # Use exactly the same bone transforms on both pictures. This
             # catches a missing face even if the head itself shakes visibly.
             actual = self.window._last_original_pixmap.toImage()
-            faceless = self.rig.renderer.render(replace(pose, angry=0)).toImage()
+            faceless = self.rig.renderer.render(replace(pose, angry=0, anger_action=0)).toImage()
             self.assertGreater(differing_pixels(actual, faceless, EYES), 40)
             self.assertGreater(differing_pixels(actual, faceless, MOUTH), 5)
             QTest.qWait(500)
             self.assertEqual(self.engine.current_phase, "angry",
                              "The single-frame fish reaction must remain visible long enough to read")
-            QTest.qWait(1200)
+            QTest.qWait(self.engine.angry_hold_ms + 600)
             self.assertEqual(self.engine.current_phase, "idle")
             self.assertLess(poses[-1].angry, 0.1)
         self.assertFalse(self.engine._waddle_timer.isActive())

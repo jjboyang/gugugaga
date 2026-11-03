@@ -124,13 +124,17 @@ def main():
     _dlog("QApplication ready")
 
     window = PetWindow(debug=DEBUG)
-    # Keep idle/sleep and interactions, but never walk to the screen centre.
+    # Disable the legacy sleep -> screen-centre walk. Local idle strolls are
+    # scheduled independently and stay within 80px of their starting position.
     os.environ["DESKTOP_PET_SLEEP_WADDLE_MS"] = "0"
     engine = AnimationEngine()
+    original_idle_sleep_ms = engine.idle_sleep_ms
+    fish_idle_sleep_ms = original_idle_sleep_ms if "DESKTOP_PET_IDLE_SLEEP_MS" in os.environ else 120000
     original_sprites = engine.sprites_dir
     fish_sprites = str(PROJECT_ROOT / "pet" / "characters" / "dafeiyu")
     selected_character = ["dafeiyu"]
-    engine.angry_hold_ms = 1000
+    engine.angry_hold_ms = 3500
+    engine.set_idle_sleep_ms(fish_idle_sleep_ms)
     engine.sprites_dir = fish_sprites
     engine._load_all_sprites()
 
@@ -151,7 +155,8 @@ def main():
     def switch_character():
         rig.set_enabled(False)
         selected_character[0] = "dafeiyu" if selected_character[0] == "penguin" else "penguin"
-        engine.angry_hold_ms = 1000 if selected_character[0] == "dafeiyu" else 450
+        engine.angry_hold_ms = 3500 if selected_character[0] == "dafeiyu" else 450
+        engine.set_idle_sleep_ms(fish_idle_sleep_ms if selected_character[0] == "dafeiyu" else original_idle_sleep_ms)
         engine.sprites_dir = fish_sprites if selected_character[0] == "dafeiyu" else original_sprites
         engine._load_all_sprites()
         engine.frame_index = 0
@@ -173,6 +178,9 @@ def main():
 
     ipc.phase_changed.connect(engine.set_state)
     engine.frame_changed.connect(show_sprite_frame)
+
+    window.interaction_started.connect(engine.notify_user_activity)
+    window.interaction_started.connect(rig.notify_user_activity)
 
     window.drag_started.connect(engine.notify_user_activity)
     window.drag_started.connect(engine.begin_drag)

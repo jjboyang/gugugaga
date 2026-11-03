@@ -9,14 +9,17 @@ import time
 from pathlib import Path
 import math
 
-from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QRadialGradient, QTransform,
 )
+from PySide6.QtWidgets import QApplication
 
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
+from pet.idle_behavior import IdleBehavior
+from pet.attention_renderer import AttentionRenderer
 
 
 class RigRenderer(OriginalMeshRenderer):
@@ -104,6 +107,7 @@ class RigRenderer(OriginalMeshRenderer):
         painter.drawPixmap(0, 0, book_mask)
         painter.end()
         self._load_angry_expression()
+        self.attention = AttentionRenderer(self._frame, asset_dir, self.manifest)
 
     def _load_angry_expression(self):
         # The angry atlas frame stands up. Align only its original facial
@@ -200,6 +204,11 @@ class RigRenderer(OriginalMeshRenderer):
 
     def render(self, pose, scale=1.0):
         result = super().render(pose, scale=scale)
+        if pose.phase == "idle" and pose.idle_action == "knock":
+            painter = QPainter(result)
+            painter.setOpacity(pose.nodes.get("root", NodePose()).opacity)
+            self.attention.overlay(painter, pose)
+            painter.end()
         hand_opacity = max(0.0, min(1.0, pose.drag_blend))
         root_opacity = pose.nodes.get("root", NodePose()).opacity
         if hand_opacity * root_opacity > 0.0001:
@@ -241,7 +250,7 @@ class RigRenderer(OriginalMeshRenderer):
         if sleeping >= 0.995 and dragged < 0.0001:
             return self._sleeping
         if sleeping < 0.0001 and dragged < 0.0001:
-            return self._awake_texture(pose)
+            return self.attention.texture(pose, self._awake_texture(pose))
 
         # A short transition keeps the original character artwork intact.
         # Premultiplied additive weighting avoids leaving the idle silhouette
@@ -273,6 +282,11 @@ class RigAnimator(QObject):
         self.window = window
         self.renderer = RigRenderer(asset_dir)
         self.motion = RigMotion()
+        self.idle_behavior = IdleBehavior(walk_mode="nearby")
+        self.idle_behavior.enabled = False
+        self._walk_origin = None
+        self._last_walk_offset = 0.0
+        self._walk_direction = 1
         self.enabled = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -285,6 +299,8 @@ class RigAnimator(QObject):
         if enabled == self.enabled:
             return
         self.enabled = enabled
+        self.idle_behavior.enabled = enabled
+        self.notify_user_activity()
         if enabled:
             self.motion.reset(self.engine.current_phase or "idle")
             self._last_tick = time.monotonic()
@@ -299,10 +315,19 @@ class RigAnimator(QObject):
 
     def notify_tap(self):
         if self.enabled:
+            self.notify_user_activity()
             self.motion.tap()
+
+    def notify_user_activity(self):
+        """Freeze any local walk at its current position before handling input."""
+        self.idle_behavior.notify_activity()
+        self.motion.cancel_idle_actions()
+        self._walk_origin = None
+        self._last_walk_offset = 0.0
 
     def notify_drag_started(self):
         if self.enabled:
+            self.notify_user_activity()
             self.motion.begin_drag()
             self._last_tick = time.monotonic()
             self._paint(0.0)
@@ -336,9 +361,61 @@ class RigAnimator(QObject):
         distance = max(150.0, self.window.width() * 2.5)
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
         phase = "dragged" if getattr(self.window, "_dragging", False) else self.engine.current_phase or "idle"
+        cue = self.idle_behavior.step(elapsed, phase, blocked=self._idle_blocked())
+        self._apply_idle_walk(cue)
         angle = getattr(self.window, "_sway_angle", 0.0)
-        pose = self.motion.step(elapsed, phase, drag_angle=angle, pointer=pointer)
+        pose = self.motion.step(
+            elapsed, phase, drag_angle=angle, pointer=pointer,
+            idle_action=cue.action, action_elapsed=cue.elapsed,
+            action_duration=cue.duration,
+        )
+        pose.walk_direction = self._walk_direction
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
         self.frame_changed.emit(self.renderer.render(pose, scale=scale))
+
+    def _idle_blocked(self):
+        if not self.window.isVisible() or getattr(self.window, "_left_down", False):
+            return True
+        popup = QApplication.activePopupWidget()
+        if popup is not None and popup.isVisible():
+            return True
+        for name in ("_speech_popup", "_question_popup", "_settings_popup"):
+            popup = getattr(self.window, name, None)
+            try:
+                if popup is not None and popup.isVisible():
+                    return True
+            except RuntimeError:
+                pass  # A closed Qt popup may already have been destroyed.
+        return False
+
+    def _apply_idle_walk(self, cue):
+        if cue.action != "walk":
+            # Cancellation freezes in place; never pull the pet away from a
+            # click/drag or an incoming work state to an old walking origin.
+            self._walk_origin = None
+            self._last_walk_offset = 0.0
+            return
+        if self._walk_origin is None:
+            self._walk_origin = QPoint(self.window.pos())
+            self._last_walk_offset = 0.0
+        change = cue.offset_x - self._last_walk_offset
+        if abs(change) > 0.01:
+            self._walk_direction = 1 if change > 0 else -1
+        self._last_walk_offset = cue.offset_x
+        screen = self.window.screen()
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            origin = self._walk_origin
+            # A manually placed partly off-screen pet still animates, but is
+            # not snapped to the screen edge when an automatic gesture starts.
+            if bounds.contains(QRect(origin, self.window.size())):
+                minimum = max(bounds.left(), origin.x() - 80)
+                maximum = min(bounds.right() - self.window.width() + 1, origin.x() + 80)
+                target_x = max(minimum, min(maximum, round(origin.x() + cue.offset_x)))
+                if self.window.x() != target_x or self.window.y() != origin.y():
+                    self.window.move(target_x, origin.y())
+        if cue.finished:
+            self._walk_origin = None
+            self._last_walk_offset = 0.0

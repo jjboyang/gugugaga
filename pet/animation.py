@@ -311,6 +311,14 @@ class AnimationEngine(QObject):
         if self.current_phase == "idle":
             self._idle_sleep_timer.start(self._idle_to_sleep_ms)
 
+    @property
+    def idle_sleep_ms(self):
+        return self._idle_to_sleep_ms
+
+    def set_idle_sleep_ms(self, milliseconds):
+        self._idle_to_sleep_ms = max(0, int(milliseconds))
+        self._schedule_idle_sleep()
+
     def _on_idle_sleep_timeout(self):
         if self.current_phase == "idle":
             self.set_state("sleep")
