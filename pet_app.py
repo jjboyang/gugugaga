@@ -11,6 +11,7 @@ from pet.window import PetWindow
 from pet.animation import AnimationEngine
 from pet.ipc import PetIPC
 from pet.rig_animator import RigAnimator
+from pet.pomodoro_controller import PomodoroController
 
 
 DEBUG = os.environ.get("PET_DEBUG") == "1"
@@ -169,6 +170,11 @@ def main():
 
     window.character_switch_requested.connect(switch_character)
 
+    pomodoro = PomodoroController(window, rig)
+    # Keep the controller reachable for the whole window lifetime.
+    window.pomodoro = pomodoro
+    app.aboutToQuit.connect(pomodoro.shutdown)
+
     ipc = PetIPC()
     _dlog("window/engine/ipc constructed")
     _dlog("sprites loaded:", {k: len(v) for k, v in engine.frames.items()})
@@ -193,7 +199,11 @@ def main():
         lambda: rig.notify_tap() if selected_character[0] == "dafeiyu" else None
     )
 
-    engine.waddle_started.connect(window.start_waddle)
+    engine.waddle_started.connect(
+        lambda: window.start_waddle()
+        if pomodoro.model.phase == "idle" and pomodoro.model.focus_since_activity < 7200
+        else None
+    )
     engine.waddle_cancelled.connect(window.stop_waddle)
     window.waddle_completed.connect(engine.on_waddle_complete)
 

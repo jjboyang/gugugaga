@@ -20,6 +20,7 @@ from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
 from pet.idle_behavior import IdleBehavior
 from pet.attention_renderer import AttentionRenderer
+from pet.pomodoro_renderer import PomodoroRenderer
 
 
 class RigRenderer(OriginalMeshRenderer):
@@ -282,6 +283,10 @@ class RigAnimator(QObject):
         self.window = window
         self.renderer = RigRenderer(asset_dir)
         self.motion = RigMotion()
+        self.pomodoro_renderer = PomodoroRenderer()
+        self.pomodoro_mode = "idle"
+        self.pomodoro_paused = False
+        self._pomodoro_elapsed = 0.0
         self.idle_behavior = IdleBehavior(walk_mode="nearby")
         self.idle_behavior.enabled = False
         self._walk_origin = None
@@ -312,6 +317,14 @@ class RigAnimator(QObject):
 
     def stop(self):
         self.set_enabled(False)
+
+    def set_pomodoro(self, mode, paused=False):
+        """Temporarily own the visual pose; IPC state continues independently."""
+        if (mode, paused) != (self.pomodoro_mode, self.pomodoro_paused):
+            self._pomodoro_elapsed = 0.0
+            self.notify_user_activity()
+        self.pomodoro_mode = mode
+        self.pomodoro_paused = paused
 
     def notify_tap(self):
         if self.enabled:
@@ -360,7 +373,9 @@ class RigAnimator(QObject):
         # Distant cursors still produce only a small, smoothly damped glance.
         distance = max(150.0, self.window.width() * 2.5)
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
-        phase = "dragged" if getattr(self.window, "_dragging", False) else self.engine.current_phase or "idle"
+        dragging = getattr(self.window, "_dragging", False) or self.engine.current_phase == "dragged"
+        pomodoro = self.pomodoro_mode != "idle" and not dragging
+        phase = "dragged" if dragging else "idle" if pomodoro else self.engine.current_phase or "idle"
         cue = self.idle_behavior.step(elapsed, phase, blocked=self._idle_blocked())
         self._apply_idle_walk(cue)
         angle = getattr(self.window, "_sway_angle", 0.0)
@@ -370,12 +385,26 @@ class RigAnimator(QObject):
             action_duration=cue.duration,
         )
         pose.walk_direction = self._walk_direction
+        if pomodoro:
+            self._pomodoro_elapsed += elapsed
+            self.pomodoro_renderer.apply_pose(
+                pose, self.pomodoro_mode, self._pomodoro_elapsed,
+                paused=self.pomodoro_paused,
+            )
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
-        self.frame_changed.emit(self.renderer.render(pose, scale=scale))
+        pixmap = self.renderer.render(pose, scale=scale)
+        if pomodoro:
+            pixmap = self.pomodoro_renderer.paint(
+                pixmap, self.pomodoro_mode, self._pomodoro_elapsed,
+                paused=self.pomodoro_paused,
+            )
+        self.frame_changed.emit(pixmap)
 
     def _idle_blocked(self):
+        if self.pomodoro_mode != "idle":
+            return True
         if not self.window.isVisible() or getattr(self.window, "_left_down", False):
             return True
         popup = QApplication.activePopupWidget()

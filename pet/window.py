@@ -52,6 +52,7 @@ class PetWindow(QWidget):
     interaction_started = Signal()
     hook_config_requested = Signal()
     character_switch_requested = Signal()
+    pomodoro_requested = Signal()
     pet_tapped = Signal()
     question_answered = Signal(str)  # selected option label
     waddle_completed = Signal()
@@ -593,6 +594,11 @@ class PetWindow(QWidget):
         character_btn.clicked.connect(lambda: self._on_menu_action(popup, "character"))
         layout.addWidget(character_btn)
 
+        pomodoro_btn = QPushButton("番茄时钟 · 专注统计")
+        pomodoro_btn.setCursor(Qt.PointingHandCursor)
+        pomodoro_btn.clicked.connect(lambda: self._on_menu_action(popup, "pomodoro"))
+        layout.addWidget(pomodoro_btn)
+
         settings_btn = QPushButton("设置")
         settings_btn.setCursor(Qt.PointingHandCursor)
         settings_btn.clicked.connect(lambda: self._on_menu_action(popup, "settings"))
@@ -645,6 +651,8 @@ class PetWindow(QWidget):
             self._show_settings_popup()
         elif action == "character":
             self.character_switch_requested.emit()
+        elif action == "pomodoro":
+            self.pomodoro_requested.emit()
         elif action == "hook":
             self.hook_config_requested.emit()
         elif action == "quit":
