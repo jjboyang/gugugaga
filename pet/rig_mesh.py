@@ -292,7 +292,8 @@ class OriginalMeshRenderer:
                 return triangle, barycentric
         raise ValueError("Suspension anchor has no painted mesh triangle")
 
-    def render(self, pose: RigPose, scale=1.0):
+    def render(self, pose: RigPose, scale=1.0, *, texture=None, vertex_deformer=None):
+        """Skin original or supplied bind art, with optional local grip motion."""
         scale = float(scale)
         if not math.isfinite(scale) or scale <= 0 or scale > 4:
             raise ValueError("Render scale must be greater than 0 and at most 4")
@@ -302,9 +303,11 @@ class OriginalMeshRenderer:
         root_opacity = max(0.0, min(1.0, pose.nodes.get("root", NodePose()).opacity))
         if root_opacity <= 0:
             return image
-        texture = self._texture_for_pose(pose)
+        texture = self._texture_for_pose(pose) if texture is None else texture
         transforms = self.transforms(pose)
         vertices = self._deformed_vertices(transforms, pose)
+        if vertex_deformer is not None:
+            vertices = vertex_deformer(vertices)
         neutral = all(
             abs(a.x() - b.x()) < 1e-8 and abs(a.y() - b.y()) < 1e-8
             for a, b in zip(self.vertices, vertices)

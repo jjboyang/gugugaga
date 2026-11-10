@@ -172,6 +172,30 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.advance(300)
         self.assertEqual(self.beep_mock.call_count, 2)
 
+    def test_pause_holds_current_art_and_animation_time_then_resumes(self):
+        self.start_focus()
+        self.rig._paint(1.25)
+        previous_time = self.rig._pomodoro_elapsed
+        captured = []
+        self.rig.frame_changed.connect(lambda image: captured.append(image.toImage()))
+        self.rig._paint(0)
+        last = captured[-1]
+        self.rig.set_pomodoro("focus", paused=True)
+        self.rig._paint(10)
+        self.assertEqual(captured[-1], last)
+        self.assertEqual(self.rig._pomodoro_elapsed, previous_time)
+        # Dragging still has priority even when the Pomodoro art is paused.
+        self.window.drag_started.emit()
+        self.assertNotEqual(captured[-1], last)
+        self.window.drag_ended.emit()
+        self.rig.timer.stop()
+        self.rig._paint(1)
+        self.assertEqual(captured[-1], last)
+        self.rig.set_pomodoro("focus", paused=False)
+        self.rig._paint(0.2)
+        self.assertAlmostEqual(self.rig._pomodoro_elapsed, previous_time + 0.2)
+        self.assertNotEqual(captured[-1], last)
+
     def test_two_hour_reminder_persists_until_user_acknowledges_activity(self):
         self.start_focus()
         for _ in range(4):

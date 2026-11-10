@@ -203,8 +203,8 @@ class RigRenderer(OriginalMeshRenderer):
         painter.end()
         return result
 
-    def render(self, pose, scale=1.0):
-        result = super().render(pose, scale=scale)
+    def render(self, pose, scale=1.0, *, texture=None, vertex_deformer=None):
+        result = super().render(pose, scale=scale, texture=texture, vertex_deformer=vertex_deformer)
         if pose.phase == "idle" and pose.idle_action == "knock":
             painter = QPainter(result)
             painter.setOpacity(pose.nodes.get("root", NodePose()).opacity)
@@ -287,6 +287,7 @@ class RigAnimator(QObject):
         self.pomodoro_mode = "idle"
         self.pomodoro_paused = False
         self._pomodoro_elapsed = 0.0
+        self._pomodoro_frame = None
         self.idle_behavior = IdleBehavior(walk_mode="nearby")
         self.idle_behavior.enabled = False
         self._walk_origin = None
@@ -320,8 +321,10 @@ class RigAnimator(QObject):
 
     def set_pomodoro(self, mode, paused=False):
         """Temporarily own the visual pose; IPC state continues independently."""
-        if (mode, paused) != (self.pomodoro_mode, self.pomodoro_paused):
+        if mode != self.pomodoro_mode:
             self._pomodoro_elapsed = 0.0
+            self._pomodoro_frame = None
+        if (mode, paused) != (self.pomodoro_mode, self.pomodoro_paused):
             self.notify_user_activity()
         self.pomodoro_mode = mode
         self.pomodoro_paused = paused
@@ -375,6 +378,9 @@ class RigAnimator(QObject):
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
         dragging = getattr(self.window, "_dragging", False) or self.engine.current_phase == "dragged"
         pomodoro = self.pomodoro_mode != "idle" and not dragging
+        if pomodoro and self.pomodoro_paused and self._pomodoro_frame is not None:
+            self.frame_changed.emit(self._pomodoro_frame)
+            return
         phase = "dragged" if dragging else "idle" if pomodoro else self.engine.current_phase or "idle"
         cue = self.idle_behavior.step(elapsed, phase, blocked=self._idle_blocked())
         self._apply_idle_walk(cue)
@@ -386,7 +392,8 @@ class RigAnimator(QObject):
         )
         pose.walk_direction = self._walk_direction
         if pomodoro:
-            self._pomodoro_elapsed += elapsed
+            if not self.pomodoro_paused:
+                self._pomodoro_elapsed += elapsed
             self.pomodoro_renderer.apply_pose(
                 pose, self.pomodoro_mode, self._pomodoro_elapsed,
                 paused=self.pomodoro_paused,
@@ -394,12 +401,25 @@ class RigAnimator(QObject):
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
-        pixmap = self.renderer.render(pose, scale=scale)
+        if pomodoro:
+            texture = self.pomodoro_renderer.texture(
+                self.pomodoro_mode, self._pomodoro_elapsed, eye_open=pose.eye_open,
+            )
+            pixmap = self.renderer.render(
+                pose, scale=scale, texture=texture,
+                vertex_deformer=lambda vertices: self.pomodoro_renderer.deform_vertices(
+                    vertices, self.pomodoro_mode, self._pomodoro_elapsed,
+                ),
+            )
+        else:
+            pixmap = self.renderer.render(pose, scale=scale)
         if pomodoro:
             pixmap = self.pomodoro_renderer.paint(
                 pixmap, self.pomodoro_mode, self._pomodoro_elapsed,
                 paused=self.pomodoro_paused,
+                artwork_rendered=True,
             )
+            self._pomodoro_frame = QPixmap(pixmap)
         self.frame_changed.emit(pixmap)
 
     def _idle_blocked(self):
