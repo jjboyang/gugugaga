@@ -18,6 +18,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
 )
+from pet.speech_bubble import Reply, SpeechBubble, choose_reply
 
 
 # Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
@@ -116,6 +117,8 @@ class PetWindow(QWidget):
         # characters retain the original whole-image drag rotation below.
         self._rig_handles_sway = False
         # Belly triple-tap easter egg
+        self._character = "dafeiyu"
+        self._last_reply_text = None
         self._belly_tap_times = []
         self._speech_popup = None
         self._question_popup = None
@@ -125,6 +128,24 @@ class PetWindow(QWidget):
         self._waddle_move_timer = QTimer(self)
         self._waddle_move_timer.timeout.connect(self._waddle_tick)
         self._waddle_anim = {}
+
+    def set_character(self, character):
+        self._character = character
+        self._belly_tap_times.clear()
+        self._last_reply_text = None
+        self._dismiss_speech_bubble()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._position_speech_bubble()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_speech_bubble()
+
+    def closeEvent(self, event):
+        self._dismiss_speech_bubble()
+        super().closeEvent(event)
 
     def _disable_windows_shadow(self):
         """Strip every DWM decoration Windows 11 still draws around frameless
@@ -381,75 +402,40 @@ class PetWindow(QWidget):
 
         if len(self._belly_tap_times) >= self._BELLY_TAP_COUNT:
             self._belly_tap_times.clear()
-            self._show_speech_bubble("咕咕嘎嘎")
+            reply = choose_reply(self._character, self._last_reply_text)
+            self._last_reply_text = reply.text
+            self._show_speech_bubble(reply)
 
-    def _show_speech_bubble(self, text):
-        """Show a speech bubble above the pet that auto-dismisses."""
-        # Close previous bubble if still visible
-        if self._speech_popup is not None:
-            try:
-                self._speech_popup.close()
-            except RuntimeError:
-                pass
-            self._speech_popup = None
-
-        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
-        popup.setAttribute(Qt.WA_TranslucentBackground)
-        popup.setAttribute(Qt.WA_ShowWithoutActivating)
-        popup.setStyleSheet("""
-            QWidget#speechBubble {
-                background: rgba(40, 40, 40, 0.90);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                border-radius: 12px;
-            }
-            QLabel {
-                color: #ffffff;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 10px 18px;
-            }
-        """)
-
-        panel = QWidget(popup)
-        panel.setObjectName("speechBubble")
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(4, 2, 4, 2)
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
-
-        panel_layout = QVBoxLayout(popup)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        panel_layout.addWidget(panel)
-
-        popup.adjustSize()
-
-        pet_geom = self.frameGeometry()
-        popup_x = pet_geom.center().x() - popup.width() // 2
-        popup_y = pet_geom.top() - popup.height() - 6
-
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen:
-            avail = screen.availableGeometry()
-            if popup_x < avail.left():
-                popup_x = avail.left() + 4
-            elif popup_x + popup.width() > avail.right():
-                popup_x = avail.right() - popup.width() - 4
-            if popup_y < avail.top():
-                popup_y = pet_geom.bottom() + 6
-
-        popup.move(popup_x, popup_y)
-        popup.show()
+    def _show_speech_bubble(self, reply):
+        """Replace the previous reply without an old timer hiding the new one."""
+        self._dismiss_speech_bubble()
+        if isinstance(reply, str):
+            reply = Reply(reply, "bubbles")
+        popup = SpeechBubble(reply, self._character, self._pet_size, self)
         self._speech_popup = popup
-        QTimer.singleShot(2200, self._dismiss_speech_bubble)
+        popup.dismissed.connect(lambda: self._speech_dismissed(popup))
+        self._position_speech_bubble()
+        popup.show()
+
+    def _position_speech_bubble(self):
+        popup = getattr(self, "_speech_popup", None)
+        if popup is not None:
+            screen = self.screen() or QGuiApplication.primaryScreen()
+            if screen:
+                popup.place(self.frameGeometry(), screen.availableGeometry())
+
+    def _speech_dismissed(self, popup):
+        if self._speech_popup is popup:
+            self._speech_popup = None
 
     def _dismiss_speech_bubble(self):
-        if self._speech_popup is not None:
+        popup = getattr(self, "_speech_popup", None)
+        self._speech_popup = None
+        if popup is not None:
             try:
-                self._speech_popup.close()
+                popup.close()
             except RuntimeError:
                 pass
-            self._speech_popup = None
 
     # --- Waddle to center ---
     _WADDLE_ACTIVE_MOVE_S = 4.5       # total active movement time (excluding pauses)

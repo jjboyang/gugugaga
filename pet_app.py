@@ -156,6 +156,7 @@ def main():
     def switch_character():
         rig.set_enabled(False)
         selected_character[0] = "dafeiyu" if selected_character[0] == "penguin" else "penguin"
+        window.set_character(selected_character[0])
         engine.angry_hold_ms = 3500 if selected_character[0] == "dafeiyu" else 450
         engine.set_idle_sleep_ms(fish_idle_sleep_ms if selected_character[0] == "dafeiyu" else original_idle_sleep_ms)
         engine.sprites_dir = fish_sprites if selected_character[0] == "dafeiyu" else original_sprites

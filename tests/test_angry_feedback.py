@@ -189,6 +189,21 @@ class FourTapAngerTests(unittest.TestCase):
         self.assertEqual(self.engine.current_phase, "idle")
         self.assertFalse(self.rig.enabled)
 
+    def test_app_character_switch_also_switches_dialogue(self):
+        def speak():
+            for _ in range(3):
+                QTest.mouseClick(self.window, Qt.LeftButton,
+                                 pos=QPoint(self.window.width() // 2, self.window.height() * 3 // 4))
+            return self.window._speech_popup.reply.text
+
+        fish_lines = {"鲸鲸", "deep deep", "seek seek", "别吵别吵"}
+        self.assertIn(speak(), fish_lines)
+        self.window.character_switch_requested.emit()
+        self.assertIsNone(self.window._speech_popup)
+        self.assertEqual(speak(), "咕咕嘎嘎")
+        self.window.character_switch_requested.emit()
+        self.assertIn(speak(), fish_lines)
+
 
 if __name__ == "__main__":
     unittest.main()
