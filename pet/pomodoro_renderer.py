@@ -30,7 +30,7 @@ class PomodoroRenderer:
     here, and dragging bypasses this renderer completely.
     """
 
-    MODES = frozenset(("idle", "focus", "focus_done", "break", "break_done", "activity"))
+    MODES = frozenset(("idle", "focus", "focus_wait", "focus_scroll", "focus_done", "break", "break_done", "activity"))
 
     def __init__(self, asset_dir=None):
         self.asset_dir = Path(asset_dir) if asset_dir else Path(__file__).parent / "characters" / "dafeiyu"
@@ -86,7 +86,9 @@ class PomodoroRenderer:
             path = self.asset_dir / "pomodoro" / f"{name}.png"
             image = QPixmap(str(path)) if path.is_file() else QPixmap()
             if image.isNull():
-                image = self._frame({"focus": "writing", "coffee": "idle", "bell": "done", "stretch": "done"}[name])
+                image = self._frame({
+                    "focus": "writing", "scroll": "writing", "coffee": "idle", "bell": "done", "stretch": "done",
+                }[name])
             elif image.size().width() != 512 or image.size().height() != 512:
                 raise ValueError(f"Pomodoro artwork must use a 512px square canvas: {path}")
             self._textures[name] = image
@@ -103,7 +105,7 @@ class PomodoroRenderer:
         if name not in self._blink_layers:
             # New poses share the same head proportions. Small per-pose offsets
             # align the eyelids; the feathered skin patches leave bangs intact.
-            dx, dy = {"focus": (0, 0), "coffee": (0, 0), "bell": (0, -2)}[name]
+            dx, dy = {"focus": (0, 0), "scroll": (0, 3), "coffee": (0, 0), "bell": (0, -2)}[name]
             layer = QPixmap(512, 512)
             layer.fill(Qt.transparent)
             p = QPainter(layer)
@@ -143,8 +145,9 @@ class PomodoroRenderer:
         if mode not in self.MODES or mode == "idle":
             return None
         t = self._time(elapsed)
-        if mode == "focus":
-            return self._with_blink(self._artwork("focus"), "focus", eye_open)
+        if mode in {"focus", "focus_wait", "focus_scroll"}:
+            name = "scroll" if mode == "focus_scroll" else "focus"
+            return self._with_blink(self._artwork(name), name, eye_open)
         if mode == "focus_done":
             return self._with_blink(self._artwork("bell"), "bell", eye_open)
         weight = self._stretch_weight(mode, t)
@@ -191,11 +194,11 @@ class PomodoroRenderer:
         left = pose.nodes.setdefault("arm_left", NodePose())
         right = pose.nodes.setdefault("arm_right", NodePose())
         head = pose.nodes.setdefault("head", NodePose())
-        if mode == "focus":
-            burst = 1 - _smooth((t % 4.8 - 2.4) / 0.5)
-            tap = 0.0 if paused else math.sin(t * 11) * burst
-            left.dy += 1.4 * tap
-            right.dy -= 1.4 * tap
+        if mode in {"focus", "focus_scroll"}:
+            if mode == "focus" and not paused:
+                tap = math.sin(t * 20)
+                left.dy += 1.4 * tap
+                right.dy -= 1.4 * tap
             head.dy += 1.0
             head.angle *= 0.45
             pose.gaze_x, pose.gaze_y = 0.0, 0.45
@@ -207,13 +210,26 @@ class PomodoroRenderer:
             head.dy += 0.6 * sip
         return pose
 
-    def deform_vertices(self, vertices, mode, elapsed, *, paused=False):
+    def deform_vertices(self, vertices, mode, elapsed, *, paused=False, scroll_direction=1):
         """Move each grip and its prop as one connected, smoothly weighted area.
 
         Apply after regular skinning, so the grip follows breathing first.
         The taper goes to zero outside each local area, avoiding cutout seams.
         """
         t = self._time(elapsed)
+        if mode == "focus":
+            tap = math.sin(t * 20) * 8
+            return [QPointF(p.x(), p.y() + tap * (
+                self._grip_weight(p.x(), p.y(), 174, 416, 24, 23)
+                - self._grip_weight(p.x(), p.y(), 309, 415, 24, 23)
+            )) for p in vertices]
+        if mode == "focus_scroll":
+            phase = t % 0.68
+            swipe = _smooth(phase / 0.26) * (1 - _smooth((phase - 0.30) / 0.35))
+            distance = -scroll_direction * 23 * swipe
+            return [QPointF(p.x(), p.y() + distance * self._grip_weight(
+                p.x(), p.y(), 299, 420, 32, 36,
+            )) for p in vertices]
         if mode == "focus_done":
             angle = math.radians(self._ring(t) * 7)
             cx, cy, rx, ry = 326.0, 381.0, 38.0, 65.0
@@ -225,8 +241,7 @@ class PomodoroRenderer:
         result = []
         for point in vertices:
             x, y = point.x(), point.y()
-            radius = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
-            weight = 1 - _smooth((radius - 0.25) / 0.75)
+            weight = self._grip_weight(x, y, cx, cy, rx, ry)
             if mode == "focus_done":
                 dx, dy = x - cx, y - cy
                 rotated_x = cx + dx * math.cos(angle) - dy * math.sin(angle)
@@ -235,6 +250,11 @@ class PomodoroRenderer:
             else:
                 result.append(QPointF(x, y - lift * weight))
         return result
+
+    @staticmethod
+    def _grip_weight(x, y, cx, cy, rx, ry):
+        radius = ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2
+        return 1 - _smooth((radius - 0.25) / 0.75)
 
     def paint(self, pixmap, mode, elapsed, *, paused=False, artwork_rendered=False):
         """Add soft accents while preserving the input's canvas, DPI and alpha."""

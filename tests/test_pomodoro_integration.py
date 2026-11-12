@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,6 +17,7 @@ from pet.pomodoro import PomodoroTimer
 from pet.pomodoro_controller import PomodoroController
 from pet.rig_animator import RigAnimator
 from pet.window import PetWindow
+from pet.work_input import WorkInput
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "pet/characters/dafeiyu/rig"
@@ -57,7 +58,11 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.engine.set_state("idle")
         self.rig = RigAnimator(self.engine, self.window, ASSETS)
         self.rig.frame_changed.connect(self.window.set_pixmap)
-        self.controller = PomodoroController(self.window, self.rig, model=self.model)
+        self.work_input = Mock(spec=WorkInput())
+        self.work_input.error = ""
+        self.work_input.take.return_value = (0, None)
+        self.work_input.stop.return_value = (0, None)
+        self.controller = PomodoroController(self.window, self.rig, model=self.model, work_input=self.work_input)
         self.controller.timer.stop()
         self.window.drag_started.connect(self.engine.begin_drag)
         self.window.drag_started.connect(self.rig.notify_drag_started)
@@ -92,6 +97,40 @@ class PomodoroIntegrationTests(unittest.TestCase):
     def advance(self, seconds):
         self.clock.advance(seconds)
         self.controller._tick()
+
+    def test_focus_input_controls_pose_and_counts_through_pause_and_resume(self):
+        self.start_focus()
+        self.controller.panel.close()
+        self.assertIn("操作 0 次", self.controller.badge_button.text())
+        self.assertIsNone(self.rig.focus_action)
+        self.work_input.take.return_value = (1, ("typing", 0))
+        self.controller._poll_input()
+        self.assertEqual(self.rig.focus_action, "typing")
+        self.work_input.take.return_value = (2, ("scroll", -1))
+        self.controller._poll_input()
+        self.assertEqual(self.rig.focus_action, "scroll")
+        self.assertIn("操作 3 次", self.controller.badge_button.text())
+        self.work_input.take.return_value = (0, None)
+        self.controller._gesture_timer.start(1)
+        QTest.qWait(30)
+        self.assertIsNone(self.rig.focus_action)
+
+        self.work_input.stop.return_value = (1, ("typing", 0))
+        self.controller.panel.primary_button.click()
+        self.assertTrue(self.model.paused)
+        self.assertFalse(self.controller._input_timer.isActive())
+        self.assertIn("操作 4 次", self.controller.badge_button.text())
+        self.assertEqual(PomodoroTimer(self.path).focus_operations, 4)
+
+        self.controller.panel.primary_button.click()
+        self.assertEqual(self.work_input.start.call_count, 2)
+        self.work_input.take.return_value = (1, None)
+        self.controller._poll_input()
+        self.assertEqual(self.model.focus_operations, 5)
+        self.assertIsNone(self.rig.focus_action)
+        self.controller.panel.reset_button.click()
+        self.start_focus()
+        self.assertIn("操作 0 次", self.controller.badge_button.text())
 
     def test_closed_panel_keeps_counting_and_badge_tracks_pet(self):
         self.start_focus()

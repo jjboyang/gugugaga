@@ -286,6 +286,9 @@ class RigAnimator(QObject):
         self.pomodoro_renderer = PomodoroRenderer()
         self.pomodoro_mode = "idle"
         self.pomodoro_paused = False
+        self.focus_action = None
+        self._focus_elapsed = 0.0
+        self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
         self._pomodoro_frame = None
         self.idle_behavior = IdleBehavior(walk_mode="nearby")
@@ -328,6 +331,12 @@ class RigAnimator(QObject):
             self.notify_user_activity()
         self.pomodoro_mode = mode
         self.pomodoro_paused = paused
+
+    def set_focus_action(self, action=None, direction=0):
+        if (action, direction) != (self.focus_action, self._scroll_direction):
+            self._focus_elapsed = 0.0
+        self.focus_action = action
+        self._scroll_direction = direction
 
     def notify_tap(self):
         if self.enabled:
@@ -392,30 +401,35 @@ class RigAnimator(QObject):
         )
         pose.walk_direction = self._walk_direction
         if pomodoro:
+            mode = self.pomodoro_mode
             if not self.pomodoro_paused:
                 self._pomodoro_elapsed += elapsed
-            self.pomodoro_renderer.apply_pose(
-                pose, self.pomodoro_mode, self._pomodoro_elapsed,
-                paused=self.pomodoro_paused,
-            )
+                self._focus_elapsed += elapsed
+            animation_time = self._pomodoro_elapsed
+            if self.focus_action and mode in {"focus", "activity"}:
+                mode = "focus_scroll" if self.focus_action == "scroll" else "focus"
+                animation_time = self._focus_elapsed
+            elif mode == "focus":
+                mode = "focus_wait"
+            self.pomodoro_renderer.apply_pose(pose, mode, animation_time, paused=self.pomodoro_paused)
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
         if pomodoro:
             texture = self.pomodoro_renderer.texture(
-                self.pomodoro_mode, self._pomodoro_elapsed, eye_open=pose.eye_open,
+                mode, animation_time, eye_open=pose.eye_open,
             )
             pixmap = self.renderer.render(
                 pose, scale=scale, texture=texture,
                 vertex_deformer=lambda vertices: self.pomodoro_renderer.deform_vertices(
-                    vertices, self.pomodoro_mode, self._pomodoro_elapsed,
+                    vertices, mode, animation_time, scroll_direction=self._scroll_direction,
                 ),
             )
         else:
             pixmap = self.renderer.render(pose, scale=scale)
         if pomodoro:
             pixmap = self.pomodoro_renderer.paint(
-                pixmap, self.pomodoro_mode, self._pomodoro_elapsed,
+                pixmap, mode, animation_time,
                 paused=self.pomodoro_paused,
                 artwork_rendered=True,
             )
