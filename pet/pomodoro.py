@@ -33,7 +33,7 @@ class PomodoroTimer:
         self.phase = "idle"
         self.paused = False
         self.remaining_seconds = float(self.FOCUS_SECONDS)
-        self.focus_operations = 0
+        self._legacy_focus_operations = None  # Preserve the previous version's saved count on rewrite.
         self.focus_since_activity = 0.0
         self.activity_reminded = False
         self.storage_error: str | None = None
@@ -66,7 +66,6 @@ class PomodoroTimer:
         self.phase = "focus"
         self.paused = False
         self.remaining_seconds = float(self.FOCUS_SECONDS)
-        self.focus_operations = 0
         self._anchor()
         self.save()
         return events
@@ -102,13 +101,8 @@ class PomodoroTimer:
         self.phase = "idle"
         self.paused = False
         self.remaining_seconds = float(self.FOCUS_SECONDS)
-        self.focus_operations = 0
         self.save()
         return events
-
-    def record_focus_operations(self, count: int):
-        if self.phase == "focus" and not self.paused:
-            self.focus_operations += count
 
     def mark_activity(self) -> list[str]:
         """Acknowledge getting up; short rests alone do not reset this count."""
@@ -224,9 +218,7 @@ class PomodoroTimer:
                 raise ValueError("Invalid timer phase")
             duration = self.BREAK_SECONDS if phase.startswith("break") else self.FOCUS_SECONDS
             remaining = self._number(raw["remaining_seconds"], maximum=duration)
-            operations = raw.get("focus_operations", 0)
-            if type(operations) is not int or operations < 0:
-                operations = 0
+            operations = raw.get("focus_operations")
             focus_since_activity = self._number(raw["focus_since_activity"])
             reminded = raw["activity_reminded"]
             if not isinstance(reminded, bool):
@@ -242,7 +234,8 @@ class PomodoroTimer:
                 days[key] = {"focus_seconds": focus, "pomodoros": count}
             self.phase = phase
             self.remaining_seconds = remaining
-            self.focus_operations = operations
+            if type(operations) is int and operations >= 0:
+                self._legacy_focus_operations = operations
             self.focus_since_activity = focus_since_activity
             self.activity_reminded = reminded
             self._days = days
@@ -264,11 +257,12 @@ class PomodoroTimer:
         raw = {
             "version": 1, "phase": self.phase,
             "remaining_seconds": self.remaining_seconds,
-            "focus_operations": self.focus_operations,
             "focus_since_activity": self.focus_since_activity,
             "activity_reminded": self.activity_reminded,
             "days": self._days,
         }
+        if self._legacy_focus_operations is not None:
+            raw["focus_operations"] = self._legacy_focus_operations
         temporary = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

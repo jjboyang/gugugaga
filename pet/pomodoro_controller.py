@@ -11,18 +11,16 @@ from PySide6.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
 
 from pet.pomodoro import PomodoroTimer
 from pet.pomodoro_panel import PomodoroPanel
-from pet.work_input import WorkInput
 
 
 class PomodoroController(QObject):
     """Keep counting when the panel is closed, without taking keyboard focus."""
 
-    def __init__(self, window, rig, *, model=None, work_input=None, parent=None):
+    def __init__(self, window, rig, *, model=None, parent=None):
         super().__init__(parent or window)
         self.window = window
         self.rig = rig
         self._owns_visuals = False
-        self.work_input = work_input if work_input is not None else WorkInput()
         self.model = model if model is not None else PomodoroTimer(
             Path(os.environ.get(
                 "DESKTOP_PET_POMODORO_PATH",
@@ -30,7 +28,6 @@ class PomodoroController(QObject):
             ))
         )
         self.panel = PomodoroPanel(self.model, window)
-        self.panel.action_starting.connect(self._before_action)
         self.panel.action_taken.connect(self._on_action)
         badge_flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         # Qt.Tool becomes an auto-hiding NSPanel on macOS, just as for the pet.
@@ -56,12 +53,6 @@ class PomodoroController(QObject):
         self.timer = QTimer(self)
         self.timer.setInterval(250)
         self.timer.timeout.connect(self._tick)
-        self._input_timer = QTimer(self)
-        self._input_timer.setInterval(25)
-        self._input_timer.timeout.connect(self._poll_input)
-        self._gesture_timer = QTimer(self)
-        self._gesture_timer.setSingleShot(True)
-        self._gesture_timer.timeout.connect(self.rig.set_focus_action)
         self.timer.start()
         self.refresh()
 
@@ -86,31 +77,7 @@ class PomodoroController(QObject):
         self._handle_events(events or [])
         self.refresh()
 
-    def _before_action(self, name):
-        if name in {"pause", "reset"}:
-            self._stop_input()
-
-    def _poll_input(self):
-        count, gesture = self.work_input.take()
-        if count:
-            self.model.record_focus_operations(count)
-            self._refresh_badge()
-        if gesture is not None:
-            action, direction = gesture
-            self.rig.set_focus_action(action, direction)
-            self._gesture_timer.start(550 if action == "typing" else 680)
-
-    def _stop_input(self):
-        if self._input_timer.isActive():
-            self._input_timer.stop()
-            count, _ = self.work_input.stop()
-            self.model.record_focus_operations(count)
-        self._gesture_timer.stop()
-        self.rig.set_focus_action()
-
     def _tick(self):
-        if self._input_timer.isActive():
-            self._poll_input()
         self._handle_events(self.model.tick())
         self.refresh()
 
@@ -122,12 +89,6 @@ class PomodoroController(QObject):
     def refresh(self):
         phase = self.model.phase
         due = self.model.focus_since_activity >= 120 * 60
-        if phase == "focus" and not self.model.paused:
-            if not self._input_timer.isActive():
-                self.work_input.start()
-                self._input_timer.start()
-        elif self._input_timer.isActive():
-            self._stop_input()
         # A completed focus session always gets its bell animation, including
         # when the activity reminder is already waiting for acknowledgement.
         mode = "activity" if due and phase != "focus_done" else phase
@@ -156,17 +117,10 @@ class PomodoroController(QObject):
             text = "叮！专注完成 · 休息一下 →"
         else:
             text = "休息结束 · 开始下一轮 →"
-        tooltip = "点击打开番茄时钟和专注统计"
-        if phase in {"focus", "focus_done"}:
-            text += f"\n操作 {self.model.focus_operations:,} 次"
-            if phase == "focus" and not self.model.paused and self.work_input.error:
-                text += " · 监听不可用"
-                tooltip = self.work_input.error
         if self.badge_button.text() != text:
             self.badge_button.setText(text)
             self.badge.adjustSize()
             self._position_badge()
-        self.badge_button.setToolTip(tooltip)
         self.badge.setVisible((phase != "idle" or due) and self.window.isVisible())
 
     def _position_badge(self):
@@ -196,7 +150,6 @@ class PomodoroController(QObject):
 
     def shutdown(self):
         self.timer.stop()
-        self._stop_input()
         self.model.shutdown()
         self.panel.close()
         self.badge.hide()

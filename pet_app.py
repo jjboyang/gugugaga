@@ -12,6 +12,7 @@ from pet.animation import AnimationEngine
 from pet.ipc import PetIPC
 from pet.rig_animator import RigAnimator
 from pet.pomodoro_controller import PomodoroController
+from pet.work_mode import WorkMode
 
 
 DEBUG = os.environ.get("PET_DEBUG") == "1"
@@ -175,6 +176,8 @@ def main():
     # Keep the controller reachable for the whole window lifetime.
     window.pomodoro = pomodoro
     app.aboutToQuit.connect(pomodoro.shutdown)
+    work = WorkMode(window, rig)
+    app.aboutToQuit.connect(work.stop)
 
     ipc = PetIPC()
     _dlog("window/engine/ipc constructed")
@@ -202,7 +205,7 @@ def main():
 
     engine.waddle_started.connect(
         lambda: window.start_waddle()
-        if pomodoro.model.phase == "idle" and pomodoro.model.focus_since_activity < 7200
+        if not work.active and pomodoro.model.phase == "idle" and pomodoro.model.focus_since_activity < 7200
         else None
     )
     engine.waddle_cancelled.connect(window.stop_waddle)

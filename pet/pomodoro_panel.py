@@ -86,7 +86,6 @@ class PomodoroPanel(QDialog):
     and alerts immediately, without creating another timer in this widget.
     """
 
-    action_starting = Signal(str)
     action_taken = Signal(object)
 
     def __init__(self, timer, parent=None):
@@ -227,7 +226,6 @@ class PomodoroPanel(QDialog):
         self.refresh()
 
     def _run_action(self, name):
-        self.action_starting.emit(name)
         events = getattr(self.timer, name)()
         self.action_taken.emit(events)
         self.refresh()

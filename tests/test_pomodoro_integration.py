@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from pet.animation import AnimationEngine
 from pet.pomodoro import PomodoroTimer
@@ -18,6 +18,7 @@ from pet.pomodoro_controller import PomodoroController
 from pet.rig_animator import RigAnimator
 from pet.window import PetWindow
 from pet.work_input import WorkInput
+from pet.work_mode import WorkMode
 
 
 ASSETS = Path(__file__).resolve().parents[1] / "pet/characters/dafeiyu/rig"
@@ -62,7 +63,8 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.work_input.error = ""
         self.work_input.take.return_value = (0, None)
         self.work_input.stop.return_value = (0, None)
-        self.controller = PomodoroController(self.window, self.rig, model=self.model, work_input=self.work_input)
+        self.controller = PomodoroController(self.window, self.rig, model=self.model)
+        self.work = WorkMode(self.window, self.rig, work_input=self.work_input)
         self.controller.timer.stop()
         self.window.drag_started.connect(self.engine.begin_drag)
         self.window.drag_started.connect(self.rig.notify_drag_started)
@@ -81,6 +83,7 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.addCleanup(self.alert.stop)
 
     def cleanup_pet(self):
+        self.work.stop()
         self.controller.shutdown()
         self.rig.stop()
         for timer in self.engine.findChildren(QTimer):
@@ -98,39 +101,62 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.clock.advance(seconds)
         self.controller._tick()
 
-    def test_focus_input_controls_pose_and_counts_through_pause_and_resume(self):
-        self.start_focus()
-        self.controller.panel.close()
-        self.assertIn("操作 0 次", self.controller.badge_button.text())
-        self.assertIsNone(self.rig.focus_action)
-        self.work_input.take.return_value = (1, ("typing", 0))
-        self.controller._poll_input()
-        self.assertEqual(self.rig.focus_action, "typing")
-        self.work_input.take.return_value = (2, ("scroll", -1))
-        self.controller._poll_input()
-        self.assertEqual(self.rig.focus_action, "scroll")
-        self.assertIn("操作 3 次", self.controller.badge_button.text())
-        self.work_input.take.return_value = (0, None)
-        self.controller._gesture_timer.start(1)
-        QTest.qWait(30)
-        self.assertIsNone(self.rig.focus_action)
+    def select_menu(self, title):
+        self.window.contextMenuEvent(None)
+        popup = self.app.activePopupWidget()
+        button = next(button for button in popup.findChildren(QPushButton) if button.text() == title)
+        button.click()
+        popup.deleteLater()
 
+    def test_work_menu_starts_an_untimed_session_with_live_operations(self):
+        self.select_menu("开启工作模式")
+        self.assertEqual(self.model.phase, "idle")
+        self.assertTrue(self.work.bubble.isVisible())
+        self.assertIn("操作 0 次", self.work.label.text())
+        self.assertIsNone(self.rig.work_action)
+        self.work_input.take.return_value = (1, ("typing", 0))
+        self.work._poll_input()
+        self.assertEqual(self.rig.work_action, "typing")
+        self.work_input.take.return_value = (2, ("scroll", -1))
+        self.work._poll_input()
+        self.assertEqual(self.rig.work_action, "scroll")
+        self.assertIn("操作 3 次", self.work.label.text())
+        self.work_input.take.return_value = (0, None)
+        self.work._gesture_timer.start(1)
+        QTest.qWait(30)
+        self.assertIsNone(self.rig.work_action)
         self.work_input.stop.return_value = (1, ("typing", 0))
+        self.select_menu("结束工作模式")
+        self.assertEqual(self.work.operations, 4)
+        self.assertFalse(self.work.bubble.isVisible())
+        self.assertFalse(self.rig.work_mode)
+        self.select_menu("开启工作模式")
+        self.assertIn("操作 0 次", self.work.label.text())
+
+    def test_work_and_pomodoro_can_run_and_stop_independently(self):
+        self.start_focus()
+        self.advance(10)
+        self.work_input.start.assert_not_called()
+        self.assertNotIn("操作", self.controller.badge_button.text())
+        self.select_menu("开启工作模式")
+        self.advance(5)
+        self.assertEqual(self.model.remaining_seconds, 1485)
+        self.assertFalse(self.work.bubble.geometry().intersects(self.controller.badge.geometry()))
         self.controller.panel.primary_button.click()
         self.assertTrue(self.model.paused)
-        self.assertFalse(self.controller._input_timer.isActive())
-        self.assertIn("操作 4 次", self.controller.badge_button.text())
-        self.assertEqual(PomodoroTimer(self.path).focus_operations, 4)
-
-        self.controller.panel.primary_button.click()
-        self.assertEqual(self.work_input.start.call_count, 2)
-        self.work_input.take.return_value = (1, None)
-        self.controller._poll_input()
-        self.assertEqual(self.model.focus_operations, 5)
-        self.assertIsNone(self.rig.focus_action)
+        self.work_input.stop.assert_not_called()
+        self.work_input.take.return_value = (2, ("typing", 0))
+        self.work._poll_input()
+        with patch.object(self.rig.pomodoro_renderer, "texture", wraps=self.rig.pomodoro_renderer.texture) as texture:
+            self.rig._paint(0.1)
+            self.assertEqual(texture.call_args.args[0], "work_typing")
         self.controller.panel.reset_button.click()
-        self.start_focus()
-        self.assertIn("操作 0 次", self.controller.badge_button.text())
+        self.assertTrue(self.work.active)
+        self.assertIn("操作 2 次", self.work.label.text())
+        self.controller.panel.primary_button.click()
+        self.select_menu("结束工作模式")
+        self.assertTrue(self.model.running)
+        self.assertEqual(self.rig.pomodoro_mode, "focus")
 
     def test_closed_panel_keeps_counting_and_badge_tracks_pet(self):
         self.start_focus()

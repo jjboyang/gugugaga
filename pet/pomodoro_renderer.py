@@ -30,7 +30,9 @@ class PomodoroRenderer:
     here, and dragging bypasses this renderer completely.
     """
 
-    MODES = frozenset(("idle", "focus", "focus_wait", "focus_scroll", "focus_done", "break", "break_done", "activity"))
+    MODES = frozenset((
+        "idle", "work_idle", "work_typing", "work_scroll", "focus", "focus_done", "break", "break_done", "activity",
+    ))
 
     def __init__(self, asset_dir=None):
         self.asset_dir = Path(asset_dir) if asset_dir else Path(__file__).parent / "characters" / "dafeiyu"
@@ -145,8 +147,8 @@ class PomodoroRenderer:
         if mode not in self.MODES or mode == "idle":
             return None
         t = self._time(elapsed)
-        if mode in {"focus", "focus_wait", "focus_scroll"}:
-            name = "scroll" if mode == "focus_scroll" else "focus"
+        if mode in {"focus", "work_idle", "work_typing", "work_scroll"}:
+            name = "scroll" if mode == "work_scroll" else "focus"
             return self._with_blink(self._artwork(name), name, eye_open)
         if mode == "focus_done":
             return self._with_blink(self._artwork("bell"), "bell", eye_open)
@@ -194,9 +196,13 @@ class PomodoroRenderer:
         left = pose.nodes.setdefault("arm_left", NodePose())
         right = pose.nodes.setdefault("arm_right", NodePose())
         head = pose.nodes.setdefault("head", NodePose())
-        if mode in {"focus", "focus_scroll"}:
-            if mode == "focus" and not paused:
-                tap = math.sin(t * 20)
+        if mode in {"focus", "work_typing", "work_scroll"}:
+            if mode != "work_scroll" and not paused:
+                if mode == "focus":
+                    burst = 1 - _smooth((t % 4.8 - 2.4) / 0.5)
+                    tap = math.sin(t * 11) * burst
+                else:
+                    tap = math.sin(t * 20)
                 left.dy += 1.4 * tap
                 right.dy -= 1.4 * tap
             head.dy += 1.0
@@ -217,13 +223,13 @@ class PomodoroRenderer:
         The taper goes to zero outside each local area, avoiding cutout seams.
         """
         t = self._time(elapsed)
-        if mode == "focus":
+        if mode == "work_typing":
             tap = math.sin(t * 20) * 8
             return [QPointF(p.x(), p.y() + tap * (
                 self._grip_weight(p.x(), p.y(), 174, 416, 24, 23)
                 - self._grip_weight(p.x(), p.y(), 309, 415, 24, 23)
             )) for p in vertices]
-        if mode == "focus_scroll":
+        if mode == "work_scroll":
             phase = t % 0.68
             swipe = _smooth(phase / 0.26) * (1 - _smooth((phase - 0.30) / 0.35))
             distance = -scroll_direction * 23 * swipe

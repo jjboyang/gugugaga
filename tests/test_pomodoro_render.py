@@ -127,18 +127,18 @@ class PomodoroRenderingTests(unittest.TestCase):
         self.assertAlmostEqual(first.nodes["arm_left"].dy, -first.nodes["arm_right"].dy)
         self.assertEqual(first.nodes["book"].opacity, 0)
 
-    def test_focus_standby_rests_hands_and_scroll_swipes_in_both_directions(self):
+    def test_work_standby_rests_hands_and_scroll_swipes_in_both_directions(self):
         from PySide6.QtCore import QPointF
 
         hand, head = QPointF(299, 420), QPointF(260, 280)
         points = [hand, head]
-        self.assertEqual(self.renderer.deform_vertices(points, "focus_wait", 0.28), points)
-        up, fixed_head = self.renderer.deform_vertices(points, "focus_scroll", 0.28, scroll_direction=1)
-        down, _ = self.renderer.deform_vertices(points, "focus_scroll", 0.28, scroll_direction=-1)
+        self.assertEqual(self.renderer.deform_vertices(points, "work_idle", 0.28), points)
+        up, fixed_head = self.renderer.deform_vertices(points, "work_scroll", 0.28, scroll_direction=1)
+        down, _ = self.renderer.deform_vertices(points, "work_scroll", 0.28, scroll_direction=-1)
         self.assertLess(up.y(), hand.y())
         self.assertGreater(down.y(), hand.y())
         self.assertEqual(fixed_head, head)
-        self.assertNotEqual(self.render("focus_scroll", 0.28).toImage(), self.render("focus_wait", 0.28).toImage())
+        self.assertNotEqual(self.render("work_scroll", 0.28).toImage(), self.render("work_idle", 0.28).toImage())
 
     def test_empty_input_is_safe(self):
         self.assertTrue(self.renderer.paint(QPixmap(), "focus", 0).isNull())

@@ -1,7 +1,7 @@
 """A small cutout skeleton renderer for DaFeiYu, using the existing Qt runtime.
 
-The logical AnimationEngine owns phase changes. This module only paints the
-layered character inside its window; it never changes the desktop position.
+The logical AnimationEngine owns phase changes. The animator paints the
+layered character and applies bounded desktop movement for its idle walk.
 """
 from __future__ import annotations
 
@@ -204,6 +204,9 @@ class RigRenderer(OriginalMeshRenderer):
         return result
 
     def render(self, pose, scale=1.0, *, texture=None, vertex_deformer=None):
+        if (texture is None and vertex_deformer is None and self.attention.authored_walk
+                and pose.phase == "idle" and pose.idle_action == "walk"):
+            vertex_deformer = self._ground_walk_feet
         result = super().render(pose, scale=scale, texture=texture, vertex_deformer=vertex_deformer)
         if pose.phase == "idle" and pose.idle_action == "knock":
             painter = QPainter(result)
@@ -218,6 +221,15 @@ class RigRenderer(OriginalMeshRenderer):
             painter.drawPixmap(0, 0, self._grip_hand)
             painter.end()
         return result
+
+    def _ground_walk_feet(self, vertices):
+        # The artwork already lifts the swinging foot. Keep the floor contact
+        # from inheriting the torso's mesh motion, while leaving the hair free.
+        grounded = []
+        for source, moved in zip(self.vertices, vertices):
+            weight = max(0.0, min(1.0, (source.y() - 409) / 71))
+            grounded.append(moved * (1.0 - weight) + source * weight)
+        return grounded
 
     def _awake_texture(self, pose):
         angry = max(0.0, min(1.0, pose.angry))
@@ -286,16 +298,15 @@ class RigAnimator(QObject):
         self.pomodoro_renderer = PomodoroRenderer()
         self.pomodoro_mode = "idle"
         self.pomodoro_paused = False
-        self.focus_action = None
-        self._focus_elapsed = 0.0
+        self.work_mode = False
+        self.work_action = None
+        self._work_elapsed = 0.0
         self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
         self._pomodoro_frame = None
         self.idle_behavior = IdleBehavior(walk_mode="nearby")
         self.idle_behavior.enabled = False
         self._walk_origin = None
-        self._last_walk_offset = 0.0
-        self._walk_direction = 1
         self.enabled = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -332,10 +343,16 @@ class RigAnimator(QObject):
         self.pomodoro_mode = mode
         self.pomodoro_paused = paused
 
-    def set_focus_action(self, action=None, direction=0):
-        if (action, direction) != (self.focus_action, self._scroll_direction):
-            self._focus_elapsed = 0.0
-        self.focus_action = action
+    def set_work_mode(self, active):
+        if active != self.work_mode:
+            self.work_mode = active
+            self.set_work_action()
+            self.notify_user_activity()
+
+    def set_work_action(self, action=None, direction=0):
+        if (action, direction) != (self.work_action, self._scroll_direction):
+            self._work_elapsed = 0.0
+        self.work_action = action
         self._scroll_direction = direction
 
     def notify_tap(self):
@@ -348,7 +365,6 @@ class RigAnimator(QObject):
         self.idle_behavior.notify_activity()
         self.motion.cancel_idle_actions()
         self._walk_origin = None
-        self._last_walk_offset = 0.0
 
     def notify_drag_started(self):
         if self.enabled:
@@ -386,36 +402,42 @@ class RigAnimator(QObject):
         distance = max(150.0, self.window.width() * 2.5)
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
         dragging = getattr(self.window, "_dragging", False) or self.engine.current_phase == "dragged"
-        pomodoro = self.pomodoro_mode != "idle" and not dragging
-        if pomodoro and self.pomodoro_paused and self._pomodoro_frame is not None:
+        work = self.work_mode and not dragging
+        pomodoro = self.pomodoro_mode != "idle" and not (work or dragging)
+        paused = pomodoro and self.pomodoro_paused
+        if paused and self._pomodoro_frame is not None:
             self.frame_changed.emit(self._pomodoro_frame)
             return
-        phase = "dragged" if dragging else "idle" if pomodoro else self.engine.current_phase or "idle"
-        cue = self.idle_behavior.step(elapsed, phase, blocked=self._idle_blocked())
+        phase = "dragged" if dragging else "idle" if work or pomodoro else self.engine.current_phase or "idle"
+        blocked = self._idle_blocked()
+        room = self._walk_room() if phase == "idle" and not blocked else None
+        cue = self.idle_behavior.step(
+            elapsed, phase, blocked=blocked, walk_room=room,
+            step_length=IdleBehavior.WALK_STEP_PX * self.window.width() / 140,
+        )
         self._apply_idle_walk(cue)
         angle = getattr(self.window, "_sway_angle", 0.0)
         pose = self.motion.step(
             elapsed, phase, drag_angle=angle, pointer=pointer,
             idle_action=cue.action, action_elapsed=cue.elapsed,
-            action_duration=cue.duration,
+            action_duration=cue.duration, walk_cycle=cue.walk_cycle,
         )
-        pose.walk_direction = self._walk_direction
-        if pomodoro:
+        pose.walk_direction = cue.walk_direction
+        pose.walk_turn = cue.walk_turn
+        if work:
+            mode = {None: "work_idle", "typing": "work_typing", "scroll": "work_scroll"}[self.work_action]
+            self._work_elapsed += elapsed
+            animation_time = self._work_elapsed
+        elif pomodoro:
             mode = self.pomodoro_mode
-            if not self.pomodoro_paused:
+            if not paused:
                 self._pomodoro_elapsed += elapsed
-                self._focus_elapsed += elapsed
             animation_time = self._pomodoro_elapsed
-            if self.focus_action and mode in {"focus", "activity"}:
-                mode = "focus_scroll" if self.focus_action == "scroll" else "focus"
-                animation_time = self._focus_elapsed
-            elif mode == "focus":
-                mode = "focus_wait"
-            self.pomodoro_renderer.apply_pose(pose, mode, animation_time, paused=self.pomodoro_paused)
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
-        if pomodoro:
+        if work or pomodoro:
+            self.pomodoro_renderer.apply_pose(pose, mode, animation_time, paused=paused)
             texture = self.pomodoro_renderer.texture(
                 mode, animation_time, eye_open=pose.eye_open,
             )
@@ -425,19 +447,19 @@ class RigAnimator(QObject):
                     vertices, mode, animation_time, scroll_direction=self._scroll_direction,
                 ),
             )
-        else:
-            pixmap = self.renderer.render(pose, scale=scale)
-        if pomodoro:
             pixmap = self.pomodoro_renderer.paint(
                 pixmap, mode, animation_time,
-                paused=self.pomodoro_paused,
+                paused=paused,
                 artwork_rendered=True,
             )
-            self._pomodoro_frame = QPixmap(pixmap)
+            if pomodoro:
+                self._pomodoro_frame = QPixmap(pixmap)
+        else:
+            pixmap = self.renderer.render(pose, scale=scale)
         self.frame_changed.emit(pixmap)
 
     def _idle_blocked(self):
-        if self.pomodoro_mode != "idle":
+        if self.work_mode or self.pomodoro_mode != "idle":
             return True
         if not self.window.isVisible() or getattr(self.window, "_left_down", False):
             return True
@@ -453,20 +475,23 @@ class RigAnimator(QObject):
                 pass  # A closed Qt popup may already have been destroyed.
         return False
 
+    def _walk_room(self):
+        screen = self.window.screen()
+        if screen is not None:
+            bounds = screen.availableGeometry()
+            origin = self._walk_origin if self._walk_origin is not None else self.window.pos()
+            if bounds.contains(QRect(origin, self.window.size())):
+                return origin.x() - bounds.left(), bounds.right() - origin.x() - self.window.width() + 1
+        return 0, 0
+
     def _apply_idle_walk(self, cue):
         if cue.action != "walk":
             # Cancellation freezes in place; never pull the pet away from a
             # click/drag or an incoming work state to an old walking origin.
             self._walk_origin = None
-            self._last_walk_offset = 0.0
             return
         if self._walk_origin is None:
             self._walk_origin = QPoint(self.window.pos())
-            self._last_walk_offset = 0.0
-        change = cue.offset_x - self._last_walk_offset
-        if abs(change) > 0.01:
-            self._walk_direction = 1 if change > 0 else -1
-        self._last_walk_offset = cue.offset_x
         screen = self.window.screen()
         if screen is not None:
             bounds = screen.availableGeometry()
@@ -474,11 +499,10 @@ class RigAnimator(QObject):
             # A manually placed partly off-screen pet still animates, but is
             # not snapped to the screen edge when an automatic gesture starts.
             if bounds.contains(QRect(origin, self.window.size())):
-                minimum = max(bounds.left(), origin.x() - 80)
-                maximum = min(bounds.right() - self.window.width() + 1, origin.x() + 80)
+                minimum = bounds.left()
+                maximum = bounds.right() - self.window.width() + 1
                 target_x = max(minimum, min(maximum, round(origin.x() + cue.offset_x)))
                 if self.window.x() != target_x or self.window.y() != origin.y():
                     self.window.move(target_x, origin.y())
         if cue.finished:
             self._walk_origin = None
-            self._last_walk_offset = 0.0

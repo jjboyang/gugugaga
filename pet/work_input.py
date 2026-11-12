@@ -1,4 +1,4 @@
-"""Passive desktop input counts for the current focus session."""
+"""Passive desktop input counts for the current work session."""
 from __future__ import annotations
 
 import os
@@ -76,7 +76,7 @@ class WorkInput:
     def take(self):
         """Drain a count and the latest animation cue, with no key or pointer data."""
         if any(not listener.is_alive() for listener in self._listeners):
-            self.error = "全局输入监听已停止，暂停并继续专注可重试。"
+            self.error = "全局输入监听已停止，重新开启工作模式可重试。"
             return self.stop()
         with self._lock:
             pending = self._pending, self._gesture
@@ -97,7 +97,7 @@ class WorkInput:
     @staticmethod
     def _stop_listeners(listeners):
         for listener in listeners:
-            # A pause can race with the listener thread entering run().
+            # Stopping the session can race with the listener thread entering run().
             while listener.is_alive() and not listener.running:
                 sleep(0.005)
             if listener.is_alive():

@@ -22,8 +22,9 @@ class IdleBehaviorTests(unittest.TestCase):
             self.assertGreaterEqual(delay, 8.0)
             self.assertLessEqual(delay, 12.02)
             self.assertIn(cue.action, behavior.ACTIONS)
-            self.assertGreaterEqual(cue.duration, 4.0)
-            self.assertLessEqual(cue.duration, 6.0)
+            minimum, maximum = (7.4, 8.6) if cue.action == "walk" else (4.0, 6.0)
+            self.assertGreaterEqual(cue.duration, minimum)
+            self.assertLessEqual(cue.duration, maximum)
             self.assertEqual(cue.progress, 0.0)
             self.assertFalse(cue.finished)
 
@@ -116,6 +117,17 @@ class IdleBehaviorTests(unittest.TestCase):
         for _ in range(200):
             cue = behavior.step(1 / 50, "idle")
             self.assertEqual(cue.offset_x, 0)
+
+    def test_walk_plants_feet_before_turning_and_skips_an_edge_too_short_for_a_step(self):
+        behavior = IdleBehavior(seed=6)
+        start = behavior.force_action("walk")
+        cues = [behavior.step(1 / 120, "idle", walk_room=(2, 80))
+                for _ in range(math.ceil(start.duration * 120))]
+        turns = [cue for cue in cues if cue.walk_turn]
+        self.assertGreater(len(turns), 30)
+        self.assertTrue(all(cue.offset_x == 80 and cue.walk_cycle % 0.5 == 0 for cue in turns))
+        self.assertEqual((turns[0].walk_direction, turns[-1].walk_direction), (1, -1))
+        self.assertTrue(all(0 <= cue.offset_x <= 80 for cue in cues))
 
     def test_walk_progress_and_displacement_do_not_depend_on_refresh_rate(self):
         samples = []

@@ -54,6 +54,7 @@ class PetWindow(QWidget):
     hook_config_requested = Signal()
     character_switch_requested = Signal()
     pomodoro_requested = Signal()
+    work_mode_requested = Signal()
     pet_tapped = Signal()
     question_answered = Signal(str)  # selected option label
     waddle_completed = Signal()
@@ -61,6 +62,7 @@ class PetWindow(QWidget):
     def __init__(self, parent=None, debug=False):
         super().__init__(parent)
         self._debug = debug
+        self.work_mode_active = False
 
         config = _load_config()
         self._pet_size = config.get("pet_size", DEFAULT_PET_SIZE)
@@ -580,6 +582,11 @@ class PetWindow(QWidget):
         character_btn.clicked.connect(lambda: self._on_menu_action(popup, "character"))
         layout.addWidget(character_btn)
 
+        work_btn = QPushButton("结束工作模式" if self.work_mode_active else "开启工作模式")
+        work_btn.setCursor(Qt.PointingHandCursor)
+        work_btn.clicked.connect(lambda: self._on_menu_action(popup, "work"))
+        layout.addWidget(work_btn)
+
         pomodoro_btn = QPushButton("番茄时钟 · 专注统计")
         pomodoro_btn.setCursor(Qt.PointingHandCursor)
         pomodoro_btn.clicked.connect(lambda: self._on_menu_action(popup, "pomodoro"))
@@ -639,6 +646,8 @@ class PetWindow(QWidget):
             self.character_switch_requested.emit()
         elif action == "pomodoro":
             self.pomodoro_requested.emit()
+        elif action == "work":
+            self.work_mode_requested.emit()
         elif action == "hook":
             self.hook_config_requested.emit()
         elif action == "quit":
