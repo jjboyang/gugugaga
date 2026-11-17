@@ -10,8 +10,8 @@ import json
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTransform
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 
 
 def _unit(value):
@@ -31,18 +31,6 @@ class AttentionRenderer:
         self.asset_dir = Path(asset_dir)
         self.manifest = manifest
         phases = manifest["phases"]
-        walk_path = self.asset_dir / "walk.png"
-        self.authored_walk = walk_path.is_file()
-        if self.authored_walk:
-            walk = QPixmap(str(walk_path))
-            if (walk.width(), walk.height()) != (2048, 1024):
-                raise ValueError(f"Walking artwork must contain eight 512px frames: {walk_path}")
-            self.walk_frames = [walk.copy(QRect(column * 512, row * 512, 512, 512))
-                                for row in range(2) for column in range(4)]
-        else:
-            self.walk_frames = [frame_loader(index) for index in dict.fromkeys(phases["waddle"])]
-        self._walk_mirrors = [frame.transformed(QTransform().scale(-1, 1))
-                              for frame in self.walk_frames]
         self.hop_frame = frame_loader(phases["done"][0])
         self.angry_frame = frame_loader(phases["angry"][0])
         done = phases["done"]
@@ -115,31 +103,12 @@ class AttentionRenderer:
             return awake
 
         action = getattr(pose, "idle_action", "")
-        if action == "walk":
-            return self._mix(awake, self._walk_frame(pose), pose.walk_blend)
         if action == "hop":
             return self._mix(awake, self.hop_frame, getattr(pose, "hop_blend", 0.0))
         if action == "knock":
             self._load_knock()
             return self._mix(awake, self.knock_frame, getattr(pose, "knock_blend", 0.0))
         return awake
-
-    def _walk_frame(self, pose):
-        cycle = pose.walk_cycle if pose.walk_cycle is not None else pose.action_elapsed * 1.4
-        frames = self._walk_mirrors if pose.walk_direction < 0 else self.walk_frames
-        frame = frames[int((cycle % 1.0) * len(frames))]
-        if not 0 < pose.walk_turn < 1:
-            return frame
-        # Briefly show a narrower profile as the character pivots in place.
-        result = QPixmap(512, 512)
-        result.fill(Qt.transparent)
-        painter = QPainter(result)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        painter.translate(256, 0)
-        painter.scale(1 - 0.18 * math.sin(math.pi * pose.walk_turn), 1)
-        painter.drawPixmap(-256, 0, frame)
-        painter.end()
-        return result
 
     def overlay(self, painter, pose):
         """Draw brief, quiet contact rings after the character mesh is painted."""

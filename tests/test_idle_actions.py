@@ -42,6 +42,10 @@ class IdleActionMotionTests(unittest.TestCase):
         self.assertLess(min(dominance), -2)
         self.assertGreater(len(runs_above(dominance, 1.5)), 4)
         self.assertGreater(max(pose.walk_blend for pose in poses), 0.98)
+        self.assertTrue(all(min(left_lift, right_lift) == 0 for left_lift, right_lift in zip(left, right)))
+        for side in ("left", "right"):
+            strides = [(pose.nodes[f"leg_{side}"].dx, pose.nodes[f"arm_{side}"].dx) for pose in poses]
+            self.assertTrue(all(foot * arm < 0 for foot, arm in strides if abs(foot) > 19))
 
     def test_knocking_has_three_separate_forward_contacts(self):
         _, poses = action_frames("knock")
@@ -105,8 +109,12 @@ class IdleActionMotionTests(unittest.TestCase):
                     self.assertTrue(all(math.isfinite(value) for value in asdict(node).values()))
                     self.assertGreater(node.sx, 0)
                     self.assertGreater(node.sy, 0)
-                    self.assertLessEqual(abs(node.dx), 10)
-                    self.assertGreaterEqual(node.dy, -24 if name == "root" else -10)
+                    horizontal_limit = 10
+                    vertical_limit = 24 if name == "root" else 10
+                    if action == "walk" and name.startswith(("leg_", "arm_")):
+                        horizontal_limit, vertical_limit = 30, 18
+                    self.assertLessEqual(abs(node.dx), horizontal_limit)
+                    self.assertGreaterEqual(node.dy, -vertical_limit)
                     self.assertLessEqual(node.dy, 10)
             for _ in range(180):
                 rested = motion.step(1 / 60, "idle")

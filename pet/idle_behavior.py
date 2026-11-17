@@ -22,6 +22,8 @@ class IdleCue:
     walk_cycle: float = 0.0
     walk_direction: int = 1
     walk_turn: float = 0.0
+    walk_effort: float = 0.0
+    walk_stride: float = 1.0
 
 
 class IdleBehavior:
@@ -39,8 +41,9 @@ class IdleBehavior:
 
     ACTIONS = ("walk", "knock", "hop")
     WALK_RADIUS_PX = 80.0
-    WALK_STEP_PX = 19.0
-    TURN_SECONDS = 0.36
+    WALK_STEP_PX = 13.0
+    TURN_SECONDS = 0.52
+    WALK_SETTLE_SECONDS = 0.30
     RESUME_GAP_S = 30.0
 
     def __init__(self, seed=None, walk_mode="nearby"):
@@ -90,7 +93,7 @@ class IdleBehavior:
         self._last_action = action
         self._elapsed = 0.0
         self._walk_legs = []
-        self._duration = self._random.uniform(7.4, 8.6) if action == "walk" else self._random.uniform(4.0, 6.0)
+        self._duration = self._random.uniform(10.4, 11.6) if action == "walk" else self._random.uniform(4.0, 6.0)
         self._direction = self._random.choice((-1.0, 1.0))
         return self._cue()
 
@@ -101,20 +104,23 @@ class IdleBehavior:
         right = min(self.WALK_RADIUS_PX, right) if right >= step_length else 0.0
         ends = (-left, right) if self._direction < 0 else (right, -left)
         points = (0.0, *ends, 0.0)
-        seconds_per_pixel = (self._duration - 2 * self.TURN_SECONDS) / (4 * self.WALK_RADIUS_PX)
+        stationary = 2 * (self.TURN_SECONDS + self.WALK_SETTLE_SECONDS)
+        seconds_per_pixel = (self._duration - stationary) / (4 * self.WALK_RADIUS_PX)
         seconds_per_pixel *= self.WALK_STEP_PX / step_length
         for start, end in zip(points, points[1:]):
             distance = abs(end - start)
             if distance > 0:
-                steps = max(1, round(distance / step_length))
-                self._walk_legs.append((start, end, distance * seconds_per_pixel, steps))
+                steps = math.ceil(distance / step_length)
+                stride = distance / steps / step_length
+                self._walk_legs.append((start, end, distance * seconds_per_pixel, steps, stride))
         if self._walk_legs and (left, right, step_length) != (self.WALK_RADIUS_PX, self.WALK_RADIUS_PX, self.WALK_STEP_PX):
             self._duration = (sum(leg[2] for leg in self._walk_legs)
-                              + (len(self._walk_legs) - 1) * self.TURN_SECONDS)
+                              + (len(self._walk_legs) - 1) * self.TURN_SECONDS
+                              + 2 * self.WALK_SETTLE_SECONDS)
 
     def _walk_sample(self):
-        remaining = self._elapsed
-        for index, (start, end, seconds, steps) in enumerate(self._walk_legs):
+        remaining = max(0.0, self._elapsed - self.WALK_SETTLE_SECONDS)
+        for index, (start, end, seconds, steps, stride) in enumerate(self._walk_legs):
             direction = 1 if end > start else -1
             if remaining <= seconds or index == len(self._walk_legs) - 1:
                 fraction = min(1.0, remaining / seconds)
@@ -126,27 +132,31 @@ class IdleBehavior:
                     travel = 1 - (1 - fraction) ** 2 / (2 * ramp * (1 - ramp))
                 else:
                     travel = (fraction - ramp / 2) / (1 - ramp)
-                return start + (end - start) * travel, steps * travel / 2, direction, 0.0
+                edge = min(fraction, 1 - fraction)
+                ease = min(1.0, edge / min(0.24, 0.8 / steps))
+                effort = ease * ease * (3 - 2 * ease)
+                return start + (end - start) * travel, steps * travel / 2, direction, 0.0, effort, stride
             remaining -= seconds
             if remaining < self.TURN_SECONDS:
                 turn = remaining / self.TURN_SECONDS
-                return end, steps / 2, direction if turn < 0.5 else -direction, turn
+                return end, steps / 2, direction if turn < 0.5 else -direction, turn, 0.0, stride
             remaining -= self.TURN_SECONDS
-        return 0.0, 0.0, int(self._direction), 0.0
+        return 0.0, 0.0, int(self._direction), 0.0, 0.0, 1.0
 
     def _cue(self, *, finished=False):
         if not self._action:
             return IdleCue()
         progress = min(1.0, max(0.0, self._elapsed / self._duration))
-        offset, cycle, direction, turn = 0.0, 0.0, 1, 0.0
+        offset, cycle, direction, turn, effort, stride = 0.0, 0.0, 1, 0.0, 0.0, 1.0
         if self._action == "walk":
-            offset, cycle, direction, turn = self._walk_sample()
+            offset, cycle, direction, turn, effort, stride = self._walk_sample()
             if self.walk_mode == "none" or finished:
                 offset = 0.0
         return IdleCue(
             action=self._action, elapsed=self._elapsed, duration=self._duration,
             progress=progress, offset_x=offset, finished=finished,
             walk_cycle=cycle, walk_direction=direction, walk_turn=turn,
+            walk_effort=effort, walk_stride=stride,
         )
 
     def step(self, dt, phase, blocked=False, *, walk_room=None, step_length=WALK_STEP_PX):

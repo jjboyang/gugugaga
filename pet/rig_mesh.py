@@ -250,7 +250,10 @@ class OriginalMeshRenderer:
                 x += transformed.x() * weight
                 y += transformed.y() * weight
             vertices.append(QPointF(x, y))
-        if getattr(pose, "phase", "idle") == "idle" and getattr(pose, "idle_action", "") == "knock":
+        idle_action = pose.idle_action if pose is not None and pose.phase == "idle" else ""
+        if idle_action == "walk" and pose.walk_blend:
+            self._skin_walk(vertices, pose)
+        if idle_action == "knock":
             # The forward fist sits in front of the face, above the ordinary
             # shoulder weights. Deform that small connected mesh region so a
             # tap moves the hand itself instead of only flashing contact rings.
@@ -273,6 +276,28 @@ class OriginalMeshRenderer:
             dy = (self.suspension_anchor[1] - actual_y) * suspension
             vertices = [QPointF(point.x() + dx, point.y() + dy) for point in vertices]
         return vertices
+
+    def _skin_walk(self, vertices, pose):
+        # Weight the standing shoes around their soles. Here the legs supply
+        # their own position so that the torso's bob cannot lift a planted foot.
+        left_foot = pose.nodes.get("leg_left", NodePose())
+        right_foot = pose.nodes.get("leg_right", NodePose())
+        left_arm = pose.nodes.get("arm_left", NodePose())
+        right_arm = pose.nodes.get("arm_right", NodePose())
+        for source, point in zip(self.vertices, vertices):
+            x, y = source.x(), source.y()
+            ground = _smooth(439, 471, y) * pose.walk_blend
+            left = ground * (1 - _smooth(234, 274, x)) * _smooth(155, 194, x)
+            right = ground * _smooth(234, 274, x) * (1 - _smooth(317, 356, x))
+            arm_left = _gaussian(x, y, 202, 381, 20, 16) * pose.walk_blend
+            arm_right = _gaussian(x, y, 321, 382, 20, 16) * pose.walk_blend
+            gaze = _gaussian(x, y, 256, 295, 89, 41) * (1 - _smooth(324, 346, y))
+            point.setX(point.x() * (1 - left - right) + (x + left_foot.dx) * left
+                       + (x + right_foot.dx) * right + 11 * gaze * pose.walk_heading
+                       + 0.65 * (arm_left * left_arm.dx + arm_right * right_arm.dx))
+            point.setY(point.y() * (1 - left - right) + (y + left_foot.dy) * left
+                       + (y + right_foot.dy) * right
+                       + 0.65 * (arm_left * left_arm.dy + arm_right * right_arm.dy))
 
     def _grip_triangle(self):
         cached = getattr(self, "_grip_triangle_cache", None)

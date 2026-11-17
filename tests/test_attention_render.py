@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from pet.rig_animator import RigRenderer
+from pet.idle_behavior import IdleBehavior
 from pet.rig_motion import RigMotion, RigPose
 
 
@@ -74,6 +75,49 @@ class AttentionRenderingTests(unittest.TestCase):
                     for value in range(512):
                         for x, y in ((value, 0), (value, 511), (0, value), (511, value)):
                             self.assertEqual(image.pixelColor(x, y).alpha(), 0)
+
+    def test_walk_turn_keeps_head_width_and_pins_both_shoes(self):
+        renderer = self.renderer
+        behavior = IdleBehavior(seed=6)
+        behavior.force_action("walk")
+        motion = RigMotion(seed=6)
+
+        def vertex_index(x, y):
+            return next(index for index, point in enumerate(renderer.vertices) if (point.x(), point.y()) == (x, y))
+
+        left_shoe, right_shoe = vertex_index(224, 480), vertex_index(288, 480)
+        left_head, right_head = vertex_index(96, 256), vertex_index(416, 256)
+        heads = []
+        for _ in range(600):
+            cue = behavior.step(1 / 120, "idle")
+            if not cue.walk_turn:
+                if heads:
+                    break
+                continue
+            pose = motion.step(1 / 120, "idle", idle_action="walk", action_elapsed=cue.elapsed,
+                               action_duration=cue.duration, walk_cue=cue)
+            vertices = renderer.deformed_vertices(pose)
+            self.assertAlmostEqual(vertices[left_shoe].y(), 480, delta=0.01)
+            self.assertAlmostEqual(vertices[right_shoe].y(), 480, delta=0.01)
+            self.assertAlmostEqual(vertices[left_shoe].x(), 224, delta=0.01)
+            self.assertAlmostEqual(vertices[right_shoe].x(), 288, delta=0.01)
+            self.assertAlmostEqual(vertices[right_head].x() - vertices[left_head].x(), 320, delta=5)
+            heads.append(pose.walk_heading)
+        self.assertGreater(len(heads), 30)
+        self.assertLess(heads[0] * heads[-1], 0)
+        self.assertLess(max(abs(a - b) for a, b in zip(heads, heads[1:])), 0.08)
+
+    def test_rising_preserves_the_original_head_and_standing_lower_body(self):
+        renderer = self.renderer
+        base = renderer.base_pixmap.toImage()
+        standing = renderer.attention.angry_frame.toImage()
+        for weight in (0.0, 0.5, 1.0):
+            pose = RigPose(idle_action="walk", walk_blend=weight)
+            texture = renderer._awake_texture(pose).toImage()
+            rise = round(renderer._WALK_RISE * weight)
+            # Includes the hair tuft, headdress, eyes, mouth and chin.
+            self.assertEqual(texture.copy(0, 0, 512, 374 - rise), base.copy(0, rise, 512, 374 - rise))
+        self.assertEqual(texture.copy(0, 360, 512, 152), standing.copy(0, 360, 512, 152))
 
 
 if __name__ == "__main__":

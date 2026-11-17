@@ -22,7 +22,7 @@ class IdleBehaviorTests(unittest.TestCase):
             self.assertGreaterEqual(delay, 8.0)
             self.assertLessEqual(delay, 12.02)
             self.assertIn(cue.action, behavior.ACTIONS)
-            minimum, maximum = (7.4, 8.6) if cue.action == "walk" else (4.0, 6.0)
+            minimum, maximum = (10.4, 11.6) if cue.action == "walk" else (4.0, 6.0)
             self.assertGreaterEqual(cue.duration, minimum)
             self.assertLessEqual(cue.duration, maximum)
             self.assertEqual(cue.progress, 0.0)
@@ -126,6 +126,7 @@ class IdleBehaviorTests(unittest.TestCase):
         turns = [cue for cue in cues if cue.walk_turn]
         self.assertGreater(len(turns), 30)
         self.assertTrue(all(cue.offset_x == 80 and cue.walk_cycle % 0.5 == 0 for cue in turns))
+        self.assertTrue(all(cue.walk_effort == 0 for cue in turns))
         self.assertEqual((turns[0].walk_direction, turns[-1].walk_direction), (1, -1))
         self.assertTrue(all(0 <= cue.offset_x <= 80 for cue in cues))
 

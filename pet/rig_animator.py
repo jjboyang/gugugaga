@@ -9,9 +9,9 @@ import time
 from pathlib import Path
 import math
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QCursor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
+    QColor, QCursor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QRadialGradient, QTransform,
 )
 from PySide6.QtWidgets import QApplication
@@ -25,6 +25,10 @@ from pet.pomodoro_renderer import PomodoroRenderer
 
 class RigRenderer(OriginalMeshRenderer):
     """Keep the original artwork and reuse its original blink/book drawings."""
+
+    _WALK_NECK_Y = 375
+    _WALK_RISE = 30
+    _WALK_SOLE_Y = 487
 
     def __init__(self, asset_dir):
         super().__init__(asset_dir)
@@ -109,6 +113,7 @@ class RigRenderer(OriginalMeshRenderer):
         painter.end()
         self._load_angry_expression()
         self.attention = AttentionRenderer(self._frame, asset_dir, self.manifest)
+        self._prepare_walk_artwork()
 
     def _load_angry_expression(self):
         # The angry atlas frame stands up. Align only its original facial
@@ -204,9 +209,6 @@ class RigRenderer(OriginalMeshRenderer):
         return result
 
     def render(self, pose, scale=1.0, *, texture=None, vertex_deformer=None):
-        if (texture is None and vertex_deformer is None and self.attention.authored_walk
-                and pose.phase == "idle" and pose.idle_action == "walk"):
-            vertex_deformer = self._ground_walk_feet
         result = super().render(pose, scale=scale, texture=texture, vertex_deformer=vertex_deformer)
         if pose.phase == "idle" and pose.idle_action == "knock":
             painter = QPainter(result)
@@ -222,22 +224,61 @@ class RigRenderer(OriginalMeshRenderer):
             painter.end()
         return result
 
-    def _ground_walk_feet(self, vertices):
-        # The artwork already lifts the swinging foot. Keep the floor contact
-        # from inheriting the torso's mesh motion, while leaving the hair free.
-        grounded = []
-        for source, moved in zip(self.vertices, vertices):
-            weight = max(0.0, min(1.0, (source.y() - 409) / 71))
-            grounded.append(moved * (1.0 - weight) + source * weight)
-        return grounded
+    def _prepare_walk_artwork(self):
+        # Reuse the exact idle head, including its silhouette, and the body
+        # beneath the neck of the atlas's original two-feet-down stance.
+        width, height = self.size
+        neck = self._WALK_NECK_Y
+        standing_neck = neck - self._WALK_RISE
+        standing = self.attention.angry_frame
+        self._seated_body = self.base_pixmap.copy(0, neck, width, height - neck)
+        self._standing_body = standing.copy(0, standing_neck, width, height - standing_neck)
+        self._walk_head = QPixmap(self.base_pixmap)
+        mask = QLinearGradient(0, neck, 0, neck + 10)
+        mask.setColorAt(0, Qt.white)
+        mask.setColorAt(1, Qt.transparent)
+        painter = QPainter(self._walk_head)
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.fillRect(self._walk_head.rect(), mask)
+        painter.end()
+        self._standing_walk = self._walk_texture(1.0)
+
+    def _walk_texture(self, strength):
+        texture = QPixmap(*self.size)
+        texture.fill(Qt.transparent)
+        painter = QPainter(texture)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setCompositionMode(QPainter.CompositionMode_Plus)
+        rise = self._WALK_RISE * strength
+        neck = self._WALK_NECK_Y - rise
+        sole = self._WALK_SOLE_Y
+        for lower, source_neck, opacity in (
+            (self._seated_body, self._WALK_NECK_Y, 1.0 - strength),
+            (self._standing_body, self._WALK_NECK_Y - self._WALK_RISE, strength),
+        ):
+            if opacity > 0:
+                # Move both necklines with the same head while keeping the
+                # original soles on their shared baseline.
+                height = lower.height() * (sole - neck) / (sole - source_neck)
+                painter.setOpacity(opacity)
+                painter.drawPixmap(QRectF(0, neck, lower.width(), height), lower, QRectF(lower.rect()))
+        painter.setOpacity(1)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        painter.drawPixmap(QPointF(0, -rise), self._walk_head)
+        painter.end()
+        return texture
 
     def _awake_texture(self, pose):
         angry = max(0.0, min(1.0, pose.angry))
         blink = max(0.0, min(1.0, 1.0 - pose.eye_open)) * (1.0 - angry)
         book = pose.nodes.get("book", NodePose(opacity=0)).opacity * (1.0 - angry)
+        walk = pose.walk_blend if pose.phase == "idle" and pose.idle_action == "walk" else 0.0
+        awake = self.base_pixmap
+        if walk > 0:
+            awake = self._standing_walk if walk >= 1 else self._walk_texture(walk)
         if blink < 0.0001 and book < 0.0001 and angry < 0.0001:
-            return self.base_pixmap
-        result = QPixmap(self.base_pixmap)
+            return awake
+        result = QPixmap(awake)
         painter = QPainter(result)
         if angry >= 0.0001:
             painter.setOpacity(angry)
@@ -245,7 +286,7 @@ class RigRenderer(OriginalMeshRenderer):
             painter.drawPixmap(0, 0, self._anger_mark)
         if blink >= 0.0001:
             painter.setOpacity(blink)
-            painter.drawPixmap(0, 0, self._closed_eyes)
+            painter.drawPixmap(QPointF(0, -self._WALK_RISE * walk), self._closed_eyes)
         if book >= 0.0001:
             painter.setOpacity(max(0.0, min(1.0, book)))
             painter.drawPixmap(0, 0, self._book)
@@ -420,10 +461,8 @@ class RigAnimator(QObject):
         pose = self.motion.step(
             elapsed, phase, drag_angle=angle, pointer=pointer,
             idle_action=cue.action, action_elapsed=cue.elapsed,
-            action_duration=cue.duration, walk_cycle=cue.walk_cycle,
+            action_duration=cue.duration, walk_cue=cue if cue.action == "walk" else None,
         )
-        pose.walk_direction = cue.walk_direction
-        pose.walk_turn = cue.walk_turn
         if work:
             mode = {None: "work_idle", "typing": "work_typing", "scroll": "work_scroll"}[self.work_action]
             self._work_elapsed += elapsed

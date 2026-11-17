@@ -9,6 +9,8 @@ from dataclasses import dataclass, field, fields
 import math
 import random
 
+from pet.idle_behavior import IdleBehavior
+
 
 @dataclass
 class NodePose:
@@ -38,9 +40,7 @@ class RigPose:
     idle_action: str = field(default="", compare=False)
     action_elapsed: float = field(default=0.0, compare=False)
     action_progress: float = field(default=0.0, compare=False)
-    walk_cycle: float | None = field(default=None, compare=False)
-    walk_direction: int = field(default=1, compare=False)
-    walk_turn: float = field(default=0.0, compare=False)
+    walk_heading: float = field(default=0.0, compare=False)
     walk_blend: float = 0.0
     knock_blend: float = 0.0
     hop_blend: float = 0.0
@@ -62,7 +62,7 @@ _FACE_DEFAULTS = {
     "angry": 0.0, "mouth_open": 0.0, "mouth_surprised": 0.0,
     "sleep_blend": 0.0, "drag_blend": 0.0,
     "suspension": 0.0,
-    "walk_blend": 0.0, "knock_blend": 0.0, "hop_blend": 0.0,
+    "knock_blend": 0.0, "hop_blend": 0.0,
     "knock_impact": 0.0, "anger_action": 0.0,
 }
 _IDLE_ACTIONS = frozenset(("walk", "knock", "hop"))
@@ -202,7 +202,7 @@ class RigMotion:
 
     def cancel_idle_actions(self):
         """Stop optional idle textures immediately; let bone motion settle."""
-        for name in ("walk_blend", "knock_blend", "hop_blend", "knock_impact"):
+        for name in ("knock_blend", "hop_blend", "knock_impact"):
             self._face[name].value = 0.0
             self._face[name].velocity = 0.0
 
@@ -224,7 +224,7 @@ class RigMotion:
         self._next_blink = self._time + interval
         return 1.0
 
-    def _targets(self, phase, drag_angle, pointer, action="", elapsed=0.0, duration=4.8, walk_cycle=None):
+    def _targets(self, phase, drag_angle, pointer, action="", elapsed=0.0, duration=4.8):
         nodes = {bone: NodePose() for bone in _BONES}
         nodes["book"].opacity = 0.0
         face = dict(_FACE_DEFAULTS)
@@ -355,8 +355,8 @@ class RigMotion:
             nodes["leg_left"].angle = 4.0 * wave(1.6)
             nodes["leg_right"].angle = -4.0 * wave(1.6)
 
-        if phase == "idle" and action:
-            self._idle_targets(nodes, face, action, elapsed, duration, motion, walk_cycle)
+        if phase == "idle" and action in {"knock", "hop"}:
+            self._idle_targets(nodes, face, action, elapsed, duration, motion)
 
         # Hair follows the *actual* head angle through slower springs rather
         # than mirroring its target; this creates secondary motion and lag.
@@ -379,7 +379,7 @@ class RigMotion:
             face["eye_open"] *= self._blink()
         return nodes, face
 
-    def _idle_targets(self, nodes, face, action, elapsed, duration, motion, walk_cycle):
+    def _idle_targets(self, nodes, face, action, elapsed, duration, motion):
         """Layer a complete, bounded action over breathing without moving a window."""
         progress = _clamp(elapsed / duration, 0.0, 1.0)
         envelope = _smoothstep(elapsed / 0.18) * _smoothstep((duration - elapsed) / 0.28)
@@ -391,21 +391,7 @@ class RigMotion:
             current = getattr(node, attribute)
             setattr(node, attribute, current + (value - current) * envelope)
 
-        if action == "walk":
-            cycle = elapsed * 1.4 if walk_cycle is None else walk_cycle
-            stride = motion * math.sin(2.0 * math.pi * cycle)
-            left_lift, right_lift = max(0.0, stride), max(0.0, -stride)
-            mix(root, "dy", -2.6 * abs(stride))
-            mix(body, "angle", 1.7 * stride)
-            mix(head, "angle", -1.1 * stride)
-            mix(left, "angle", -9.5 * stride)
-            mix(right, "angle", 9.5 * stride)
-            mix(nodes["leg_left"], "dy", -7.5 * left_lift)
-            mix(nodes["leg_right"], "dy", -7.5 * right_lift)
-            mix(nodes["leg_left"], "angle", -7.0 * stride)
-            mix(nodes["leg_right"], "angle", 7.0 * stride)
-            face["gaze_x"] = 0.15 * stride
-        elif action == "knock":
+        if action == "knock":
             # Three deliberate forward taps, separated enough to read at the
             # default 140px size. The renderer can also use this pulse for a
             # contact ripple on the screen-facing hand.
@@ -449,8 +435,65 @@ class RigMotion:
             mix(right, "angle", 7.0 * motion * stretch)
             face["mouth_open"] = 0.28 * lift
 
+    @staticmethod
+    def _walk_foot(cycle, step):
+        phase = cycle % 1.0
+        support = 0.58
+        # During support the shoe moves back relative to the window at the
+        # same rate that the window advances. Only the swing foot lifts.
+        if phase < support:
+            return (support - 2 * phase) * step, 0.0
+        swing = (phase - support) / (1 - support)
+        reach = _smoothstep(swing)
+        # Match the support phase's horizontal velocity at toe-off and landing.
+        carry = -2 * (1 - support) * swing * (1 - swing) * (1 - 2 * swing)
+        return ((2 * reach - 1) * support + carry) * step, 18 * math.sin(math.pi * swing) ** 2
+
+    def _apply_walk(self, pose, cue, duration):
+        settle = IdleBehavior.WALK_SETTLE_SECONDS
+        envelope = _smoothstep(pose.action_elapsed / settle) * _smoothstep((duration - pose.action_elapsed) / settle)
+        scale = 0.35 if self.reduced_motion else 1.0
+        if cue is None:
+            cycle, direction, turn, effort, stride = pose.action_elapsed * 1.55, 1, 0.0, envelope, 1.0
+        else:
+            cycle = cue.walk_cycle
+            direction, turn = cue.walk_direction, cue.walk_turn
+            effort, stride = cue.walk_effort, cue.walk_stride
+        old_direction = direction if turn < 0.5 else -direction
+        look = old_direction * (1 - 2 * _smoothstep((turn - 0.08) / 0.72))
+        hips = old_direction * (1 - 2 * _smoothstep((turn - 0.23) / 0.72))
+        pose.walk_blend = envelope
+        pose.walk_heading = look * envelope * scale
+        pose.gaze_x = 0.45 * pose.walk_heading
+
+        # The rig's 512px canvas is displayed at a default width of 140px.
+        step = stride * IdleBehavior.WALK_STEP_PX / 140 * 512
+        for side, offset in (("left", 0.0), ("right", 0.5)):
+            x, lift = self._walk_foot(cycle + offset, step)
+            arm_x, _ = self._walk_foot(cycle + offset - 0.035, step)
+            leg = pose.nodes[f"leg_{side}"]
+            arm = pose.nodes[f"arm_{side}"]
+            leg.dx = x * direction * effort * scale
+            leg.dy = -lift * effort * scale
+            arm.dx = -0.48 * arm_x * direction * effort * scale
+            arm.dy = -abs(arm_x) * 0.15 * effort * scale
+
+        # Torso rolls with weight transfer. At a turn, look first and let
+        # the shoulders follow while both shoes stay on the floor.
+        beat = 2 * math.pi * cycle
+        root, body, head = (pose.nodes[name] for name in ("root", "body", "head"))
+        root.dy -= (1.6 - 1.6 * math.cos(beat * 2)) * effort * scale
+        root.dy += 1.0 * math.sin(math.pi * turn) ** 2 * scale
+        body.dx += 2.0 * hips * envelope * scale
+        body.angle += (2.0 * hips * envelope + 1.8 * math.sin(beat) * effort) * scale
+        head.angle += (1.6 * look * envelope - 0.9 * math.sin(beat) * effort) * scale
+        head.dx += 7.0 * pose.walk_heading
+        for side in ("left", "right"):
+            hair = pose.nodes[f"hair_{side}"]
+            hair.angle += (1.8 * math.sin(beat - 0.65) * effort - 0.8 * hips * envelope) * scale
+
     def step(self, dt, phase, drag_angle=0.0, pointer=(0.0, 0.0),
-             idle_action="", action_elapsed=0.0, action_duration=0.0, walk_cycle=None):
+             idle_action="", action_elapsed=0.0, action_duration=0.0, walk_cue=None):
         """Advance by seconds and return a fresh pose; dt may include a pause."""
         dt = float(dt)
         dt = max(0.0, dt) if math.isfinite(dt) else 0.0
@@ -474,11 +517,10 @@ class RigMotion:
             stale = max(0.0, self._time - self._last_drag_event - 0.035)
             drag_angle = self._drag_event_angle * math.exp(-stale * 10.0)
         gaze = tuple(_clamp(float(v), -1.0, 1.0) if math.isfinite(float(v)) else 0.0 for v in pointer)
-        targets, face_targets = self._targets(phase, drag_angle, gaze, action, elapsed, duration, walk_cycle)
+        targets, face_targets = self._targets(phase, drag_angle, gaze, action, elapsed, duration)
         result = RigPose(phase=phase, idle_action=action,
                          action_elapsed=elapsed if action else 0.0,
-                         action_progress=_clamp(elapsed / duration, 0.0, 1.0) if action else 0.0,
-                         walk_cycle=walk_cycle)
+                         action_progress=_clamp(elapsed / duration, 0.0, 1.0) if action else 0.0)
         for bone, target in targets.items():
             node = NodePose()
             frequency = 7.0 if bone.startswith("hair_") else 13.0
@@ -508,10 +550,12 @@ class RigMotion:
                 frequency = 28.0
             elif name == "eye_open":
                 frequency = 38.0
-            elif name in ("walk_blend", "knock_blend", "hop_blend", "knock_impact", "anger_action"):
+            elif name in ("knock_blend", "hop_blend", "knock_impact", "anger_action"):
                 frequency = 24.0
             else:
                 frequency = 15.0
             value = self._face[name].advance(target, dt, frequency)
             setattr(result, name, _clamp(value, -1.0 if name.startswith("gaze_") else 0.0, 1.0))
+        if action == "walk":
+            self._apply_walk(result, walk_cue, duration)
         return result
