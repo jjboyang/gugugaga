@@ -29,6 +29,8 @@ class RigPose:
     gaze_x: float = 0.0
     gaze_y: float = 0.0
     angry: float = 0.0
+    cover_hands: float = 0.0
+    peek: float = 0.0
     mouth_open: float = 0.0
     mouth_surprised: float = 0.0
     sleep_blend: float = 0.0

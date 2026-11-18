@@ -7,9 +7,9 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QContextMenuEvent, QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 import pet_app
 from pet.ipc import PetIPC
@@ -79,6 +79,7 @@ class IdleIntegrationTests(unittest.TestCase):
             timer.stop()
         window.close()
         window.deleteLater()
+        QApplication.processEvents()
 
     def paint(self, seconds=0.1):
         self.rig._paint(seconds)
@@ -229,6 +230,75 @@ class IdleIntegrationTests(unittest.TestCase):
             self.assertEqual(self.last_pose.idle_action, "")
         finally:
             menu.close()
+
+    def test_call_menu_samples_cursor_once_and_finishes_seated_at_destination(self):
+        at = self.window.rect().center()
+        event = QContextMenuEvent(QContextMenuEvent.Mouse, at, self.window.mapToGlobal(at))
+        QApplication.sendEvent(self.window, event)
+        popup = QApplication.activePopupWidget()
+        call = next(b for b in popup.findChildren(QPushButton) if b.text() == "过来一下")
+        QTest.mouseClick(call, Qt.LeftButton)
+        origin = self.window.pos()
+        cursor = origin + QPoint(-100, -80)
+        with patch("pet.rig_animator.QCursor.pos", return_value=cursor) as point:
+            self.paint(0.5)
+            self.assertEqual(self.window.pos(), origin)
+            self.paint(0.8)
+            target = self.rig.call.target
+            point.return_value = origin + QPoint(150, 60)
+            self.paint(0.9)
+            self.assertEqual(self.last_pose.idle_action, "walk")
+            self.assertLess(self.window.x(), origin.x())
+            self.assertLess(self.window.y(), origin.y())
+            self.paint(8)
+            self.assertIsNone(self.rig.call)
+            self.assertEqual(self.window.pos(), target)
+            self.assertLess(abs(target.x() + self.window.width() / 2 - cursor.x()),
+                            self.window.width() * 0.50)
+            self.paint(0.1)
+            self.assertEqual(self.last_pose.idle_action, "")
+            self.assertEqual(self.window.pos(), target)
+
+    def test_facial_taps_cover_peek_and_recover_without_belly_reply(self):
+        size = self.window.width()
+        QTest.mouseClick(self.window, Qt.LeftButton, pos=QPoint(size // 2, size // 2))
+        self.paint(0.25)
+        self.assertLess(self.last_pose.eye_open, 0.05)
+        cheek = QPoint(round(size * 0.62), round(size * 0.66))
+        QTest.mouseClick(self.window, Qt.LeftButton, pos=cheek)
+        self.paint(0.2)
+        self.assertLess(self.last_pose.nodes["head"].angle, -2)
+        for _ in range(2):
+            QTest.mouseClick(self.window, Qt.LeftButton, pos=cheek)
+        self.paint(0.5)
+        self.assertEqual(self.window._speech_popup.reply.text, "别吵别吵")
+        self.assertEqual(self.last_pose.cover_hands, 1)
+        self.assertEqual(self.last_pose.peek, 0)
+        QTest.mouseClick(self.window, Qt.LeftButton, pos=cheek)
+        self.paint(0.3)
+        self.assertEqual(self.last_pose.cover_hands, 1)
+        self.paint(0.8)
+        self.assertEqual(self.last_pose.peek, 1)
+        self.paint(1.0)
+        self.assertEqual(self.last_pose.cover_hands, 0)
+        self.assertEqual(self.rig.face.kind, "")
+        self.assertEqual(self.engine.current_phase, "idle")
+
+    def test_switching_character_or_dragging_cancels_pending_call(self):
+        self.window.come_here_requested.emit()
+        self.window.character_switch_requested.emit()
+        self.assertIsNone(self.rig.call)
+        self.window.character_switch_requested.emit()
+        self.rig.timer.stop()
+        self.window.come_here_requested.emit()
+        start = self.window.frameGeometry().center()
+        self.mouse(QEvent.MouseButtonPress, start)
+        self.mouse(QEvent.MouseMove, start + QPoint(35, 0))
+        self.assertIsNone(self.rig.call)
+        position = self.window.pos()
+        self.paint(4.0)
+        self.assertEqual(self.window.pos(), position)
+        self.mouse(QEvent.MouseButtonRelease, start + QPoint(35, 0))
 
     def test_fish_has_time_for_idle_gestures_and_longer_anger_without_changing_penguin(self):
         self.assertGreaterEqual(self.engine._idle_to_sleep_ms, 100000)

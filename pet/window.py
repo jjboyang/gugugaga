@@ -55,6 +55,8 @@ class PetWindow(QWidget):
     character_switch_requested = Signal()
     pomodoro_requested = Signal()
     work_mode_requested = Signal()
+    come_here_requested = Signal()
+    face_tapped = Signal(str, int)
     pet_tapped = Signal()
     question_answered = Signal(str)  # selected option label
     waddle_completed = Signal()
@@ -110,6 +112,7 @@ class PetWindow(QWidget):
         self._drag_offset = QPoint()
         self._dragging = False
         self._left_down = False
+        self.face_rise_ratio = 0.0
         self._press_global = QPoint()
         self._last_global_pos = QPoint()
         # Smoothed horizontal drag velocity → pendulum-like sway angle (degrees).
@@ -384,8 +387,19 @@ class PetWindow(QWidget):
             if was_drag:
                 self.drag_ended.emit()
             else:
+                pos = event.position().toPoint()
+                x, y = pos.x() / self.width(), pos.y() / self.height()
+                if self._character == "dafeiyu":
+                    y += self.face_rise_ratio
+                    if 0.32 <= x <= 0.68 and 0.58 <= y <= 0.73:
+                        self.face_tapped.emit("cheek", -1 if x < 0.5 else 1)
+                        return
+                    if 0.25 <= x <= 0.75 and 0.19 <= y < 0.58:
+                        self.pet_tapped.emit()
+                        self.face_tapped.emit("head", 0)
+                        return
                 self.pet_tapped.emit()
-                self._check_belly_tap(event.position().toPoint())
+                self._check_belly_tap(pos)
 
     # --- Belly triple-tap easter egg ---
     _BELLY_Y_MIN_RATIO = 0.55
@@ -407,6 +421,9 @@ class PetWindow(QWidget):
             reply = choose_reply(self._character, self._last_reply_text)
             self._last_reply_text = reply.text
             self._show_speech_bubble(reply)
+
+    def say(self, text, mood):
+        self._show_speech_bubble(Reply(text, mood))
 
     def _show_speech_bubble(self, reply):
         """Replace the previous reply without an old timer hiding the new one."""
@@ -544,7 +561,8 @@ class PetWindow(QWidget):
         self._apply_label_pixmap()
 
     def contextMenuEvent(self, event):
-        popup = QWidget(None, Qt.Popup | Qt.FramelessWindowHint)
+        popup = QWidget(self, Qt.Popup | Qt.FramelessWindowHint)
+        popup.setAttribute(Qt.WA_DeleteOnClose)
         popup.setAttribute(Qt.WA_TranslucentBackground)
         popup.setAttribute(Qt.WA_ShowWithoutActivating)
         popup.setStyleSheet("""
@@ -576,6 +594,13 @@ class PetWindow(QWidget):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(2)
+
+        if self._character == "dafeiyu":
+            call_btn = QPushButton("过来一下")
+            call_btn.setCursor(Qt.PointingHandCursor)
+            call_btn.setToolTip("选中后，把鼠标移到想让大肥鱼坐下的位置")
+            call_btn.clicked.connect(lambda: self._on_menu_action(popup, "call"))
+            layout.addWidget(call_btn)
 
         character_btn = QPushButton("切换角色：企鹅 / 大肥鱼")
         character_btn.setCursor(Qt.PointingHandCursor)
@@ -642,6 +667,8 @@ class PetWindow(QWidget):
         popup.close()
         if action == "settings":
             self._show_settings_popup()
+        elif action == "call":
+            self.come_here_requested.emit()
         elif action == "character":
             self.character_switch_requested.emit()
         elif action == "pomodoro":

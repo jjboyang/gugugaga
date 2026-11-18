@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication
 
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
+from pet.companion import CallWalk, FaceReaction
 from pet.idle_behavior import IdleBehavior
 from pet.attention_renderer import AttentionRenderer
 from pet.pomodoro_renderer import PomodoroRenderer
@@ -114,6 +115,73 @@ class RigRenderer(OriginalMeshRenderer):
         self._load_angry_expression()
         self.attention = AttentionRenderer(self._frame, asset_dir, self.manifest)
         self._prepare_walk_artwork()
+        self._prepare_cover_artwork()
+
+    def _prepare_cover_artwork(self):
+        # Use the raised arms and the unobstructed apron from the atlas cheer.
+        cheer = self.attention.hop_frame
+
+        def cut(points):
+            result = QPixmap(*self.size)
+            result.fill(Qt.transparent)
+            painter = QPainter(result)
+            painter.setRenderHint(QPainter.Antialiasing)
+            path = QPainterPath()
+            path.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
+            painter.setClipPath(path)
+            painter.drawPixmap(0, 0, cheer)
+            painter.end()
+            return result
+
+        self._cover_bodice = QPixmap(*self.size)
+        self._cover_bodice.fill(Qt.transparent)
+        painter = QPainter(self._cover_bodice)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(QRectF(0, 370, 512, 114), cheer, QRectF(0, 349, 512, 137))
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        painter.translate(255, 401)
+        painter.scale(83, 37)
+        mask = QRadialGradient(0, 0, 1)
+        mask.setColorAt(0.79, Qt.white)
+        mask.setColorAt(1.0, Qt.transparent)
+        painter.fillRect(QRectF(-4, -12, 8, 16), mask)
+        painter.end()
+        # Coordinates follow the outlines of the fingers, cuffs and navy sleeves.
+        self._cover_arms = [
+            (cut([(201, 352), (185, 340), (168, 335), (151, 326), (144, 317),
+                  (142, 306), (139, 304), (136, 308), (133, 314), (126, 307),
+                  (119, 304), (116, 308), (120, 316), (113, 313), (110, 316),
+                  (109, 320), (113, 323), (106, 325), (105, 330), (112, 333),
+                  (108, 337), (111, 342), (120, 344), (129, 349), (136, 349),
+                  (147, 358), (154, 362), (160, 365), (169, 370), (183, 379),
+                  (199, 381), (208, 378)]), -1, 202, 366),
+            (cut([(302, 347), (319, 337), (337, 331), (345, 325), (350, 312),
+                  (351, 303), (355, 302), (358, 305), (361, 310), (369, 304),
+                  (377, 300), (381, 301), (381, 306), (378, 313), (385, 311),
+                  (389, 314), (387, 319), (383, 321), (389, 321), (390, 325),
+                  (388, 329), (383, 331), (388, 332), (387, 337), (379, 339),
+                  (371, 344), (365, 345), (358, 351), (349, 357), (342, 360),
+                  (337, 365), (329, 374), (316, 379), (301, 381)]), 1, 305, 365),
+        ]
+
+    def _draw_cover(self, painter, pose):
+        lift = pose.cover_hands
+        painter.save()
+        painter.setOpacity(min(1.0, lift * 2))
+        painter.drawPixmap(0, 0, self._cover_bodice)
+        painter.restore()
+        for arm, side, pivot_x, pivot_y in self._cover_arms:
+            painter.save()
+            painter.setOpacity(min(1.0, lift * 2))
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.translate(pivot_x - side * 8, 397)
+            # The near hand drops to the cheek first, exposing one eye.
+            peek = pose.peek if side > 0 else 0
+            angle = 98 - lift * 37 - peek * 39
+            painter.rotate(-side * angle)
+            painter.scale(0.90, 0.90)
+            painter.drawPixmap(-pivot_x, -pivot_y, arm)
+            painter.restore()
 
     def _load_angry_expression(self):
         # The angry atlas frame stands up. Align only its original facial
@@ -276,7 +344,7 @@ class RigRenderer(OriginalMeshRenderer):
         awake = self.base_pixmap
         if walk > 0:
             awake = self._standing_walk if walk >= 1 else self._walk_texture(walk)
-        if blink < 0.0001 and book < 0.0001 and angry < 0.0001:
+        if blink < 0.0001 and book < 0.0001 and angry < 0.0001 and not pose.cover_hands:
             return awake
         result = QPixmap(awake)
         painter = QPainter(result)
@@ -290,6 +358,8 @@ class RigRenderer(OriginalMeshRenderer):
         if book >= 0.0001:
             painter.setOpacity(max(0.0, min(1.0, book)))
             painter.drawPixmap(0, 0, self._book)
+        if pose.cover_hands:
+            self._draw_cover(painter, pose)
         painter.end()
         return result
 
@@ -348,6 +418,8 @@ class RigAnimator(QObject):
         self.idle_behavior = IdleBehavior(walk_mode="nearby")
         self.idle_behavior.enabled = False
         self._walk_origin = None
+        self.call = None
+        self.face = FaceReaction()
         self.enabled = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -360,6 +432,7 @@ class RigAnimator(QObject):
         if enabled == self.enabled:
             return
         self.enabled = enabled
+        self.cancel_interaction()
         self.idle_behavior.enabled = enabled
         self.notify_user_activity()
         if enabled:
@@ -380,6 +453,7 @@ class RigAnimator(QObject):
             self._pomodoro_elapsed = 0.0
             self._pomodoro_frame = None
         if (mode, paused) != (self.pomodoro_mode, self.pomodoro_paused):
+            self.cancel_interaction()
             self.notify_user_activity()
         self.pomodoro_mode = mode
         self.pomodoro_paused = paused
@@ -388,6 +462,7 @@ class RigAnimator(QObject):
         if active != self.work_mode:
             self.work_mode = active
             self.set_work_action()
+            self.cancel_interaction()
             self.notify_user_activity()
 
     def set_work_action(self, action=None, direction=0):
@@ -396,13 +471,32 @@ class RigAnimator(QObject):
         self.work_action = action
         self._scroll_direction = direction
 
+    def cancel_interaction(self):
+        self.call = None
+        self.face.clear()
+
+    def call_over(self):
+        if self.enabled:
+            self.engine.notify_user_activity()
+            self.notify_user_activity()
+            self.face.clear()
+            self.call = CallWalk()
+            self.window.say("鼠标指一下，我就来", "bubbles")
+
+    def touch_face(self, region, side):
+        if self.enabled and self.engine.current_phase != "angry":
+            if self.face.tap(region, side):
+                self.window.say("别吵别吵", "hush")
+
     def notify_tap(self):
         if self.enabled:
             self.notify_user_activity()
+            self.face.clear()
             self.motion.tap()
 
     def notify_user_activity(self):
         """Freeze any local walk at its current position before handling input."""
+        self.call = None
         self.idle_behavior.notify_activity()
         self.motion.cancel_idle_actions()
         self._walk_origin = None
@@ -410,6 +504,7 @@ class RigAnimator(QObject):
     def notify_drag_started(self):
         if self.enabled:
             self.notify_user_activity()
+            self.face.clear()
             self.motion.begin_drag()
             self._last_tick = time.monotonic()
             self._paint(0.0)
@@ -443,26 +538,40 @@ class RigAnimator(QObject):
         distance = max(150.0, self.window.width() * 2.5)
         pointer = ((cursor.x() - center.x()) / distance, (cursor.y() - center.y()) / distance)
         dragging = getattr(self.window, "_dragging", False) or self.engine.current_phase == "dragged"
-        work = self.work_mode and not dragging
-        pomodoro = self.pomodoro_mode != "idle" and not (work or dragging)
+        if dragging or not self.window.isVisible() or elapsed > IdleBehavior.RESUME_GAP_S:
+            self.cancel_interaction()
+        interacting = bool(self.call or self.face.kind)
+        work = self.work_mode and not (dragging or interacting)
+        pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting)
         paused = pomodoro and self.pomodoro_paused
         if paused and self._pomodoro_frame is not None:
             self.frame_changed.emit(self._pomodoro_frame)
             return
-        phase = "dragged" if dragging else "idle" if work or pomodoro else self.engine.current_phase or "idle"
-        blocked = self._idle_blocked()
-        room = self._walk_room() if phase == "idle" and not blocked else None
-        cue = self.idle_behavior.step(
-            elapsed, phase, blocked=blocked, walk_room=room,
-            step_length=IdleBehavior.WALK_STEP_PX * self.window.width() / 140,
-        )
-        self._apply_idle_walk(cue)
+        phase = "dragged" if dragging else "idle" if work or pomodoro or interacting else self.engine.current_phase or "idle"
+        if self.call:
+            cue = self.call.advance(elapsed, self.window, cursor)
+            if self.call.finished:
+                if self.call.nearby:
+                    self.window.say("干嘛", "bubbles")
+                self.call = None
+                self.idle_behavior.notify_activity()
+        else:
+            blocked = interacting or self._idle_blocked()
+            room = self._walk_room() if phase == "idle" and not blocked else None
+            cue = self.idle_behavior.step(
+                elapsed, phase, blocked=blocked, walk_room=room,
+                step_length=IdleBehavior.WALK_STEP_PX * self.window.width() / 140,
+            )
+            self._apply_idle_walk(cue)
         angle = getattr(self.window, "_sway_angle", 0.0)
         pose = self.motion.step(
             elapsed, phase, drag_angle=angle, pointer=pointer,
             idle_action=cue.action, action_elapsed=cue.elapsed,
             action_duration=cue.duration, walk_cue=cue if cue.action == "walk" else None,
         )
+        self.window.face_rise_ratio = pose.walk_blend * self.renderer._WALK_RISE / self.renderer.size[1]
+        if self.face.kind:
+            self.face.apply(pose, elapsed)
         if work:
             mode = {None: "work_idle", "typing": "work_typing", "scroll": "work_scroll"}[self.work_action]
             self._work_elapsed += elapsed

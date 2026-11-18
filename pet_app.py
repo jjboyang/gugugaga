@@ -186,6 +186,7 @@ def main():
     app.aboutToQuit.connect(ipc.stop)
     app.aboutToQuit.connect(rig.stop)
 
+    ipc.phase_changed.connect(lambda _phase: rig.cancel_interaction())
     ipc.phase_changed.connect(engine.set_state)
     engine.frame_changed.connect(show_sprite_frame)
 
@@ -198,6 +199,8 @@ def main():
     window.drag_ended.connect(engine.end_drag)
     window.drag_ended.connect(rig.notify_drag_ended)
     window.drag_moved.connect(rig.notify_drag_motion)
+    window.come_here_requested.connect(rig.call_over)
+    window.face_tapped.connect(rig.touch_face)
     window.pet_tapped.connect(engine.notify_pet_tap)
     window.pet_tapped.connect(
         lambda: rig.notify_tap() if selected_character[0] == "dafeiyu" else None

@@ -118,20 +118,23 @@ class IdleBehavior:
                               + (len(self._walk_legs) - 1) * self.TURN_SECONDS
                               + 2 * self.WALK_SETTLE_SECONDS)
 
+    @staticmethod
+    def walk_progress(fraction):
+        """Mostly even travel with a short acceleration and braking ramp."""
+        ramp = 0.18
+        if fraction < ramp:
+            return fraction ** 2 / (2 * ramp * (1 - ramp))
+        if fraction > 1 - ramp:
+            return 1 - (1 - fraction) ** 2 / (2 * ramp * (1 - ramp))
+        return (fraction - ramp / 2) / (1 - ramp)
+
     def _walk_sample(self):
         remaining = max(0.0, self._elapsed - self.WALK_SETTLE_SECONDS)
         for index, (start, end, seconds, steps, stride) in enumerate(self._walk_legs):
             direction = 1 if end > start else -1
             if remaining <= seconds or index == len(self._walk_legs) - 1:
                 fraction = min(1.0, remaining / seconds)
-                # Mostly even speed, with a short acceleration and braking ramp.
-                ramp = 0.18
-                if fraction < ramp:
-                    travel = fraction ** 2 / (2 * ramp * (1 - ramp))
-                elif fraction > 1 - ramp:
-                    travel = 1 - (1 - fraction) ** 2 / (2 * ramp * (1 - ramp))
-                else:
-                    travel = (fraction - ramp / 2) / (1 - ramp)
+                travel = self.walk_progress(fraction)
                 edge = min(fraction, 1 - fraction)
                 ease = min(1.0, edge / min(0.24, 0.8 / steps))
                 effort = ease * ease * (3 - 2 * ease)
