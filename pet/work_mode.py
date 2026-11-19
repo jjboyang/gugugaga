@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
@@ -38,6 +39,12 @@ class WorkMode(QObject):
         self._gesture_timer = QTimer(self)
         self._gesture_timer.setSingleShot(True)
         self._gesture_timer.timeout.connect(self.rig.set_work_action)
+        self._pause_timer = QTimer(self)
+        self._pause_timer.setSingleShot(True)
+        self._pause_timer.setInterval(6000)
+        self._pause_timer.timeout.connect(self._on_pause)
+        self._burst_inputs = 0
+        self._next_greeting = 0.0
         window.installEventFilter(self)
         window.work_mode_requested.connect(self.toggle)
 
@@ -50,6 +57,8 @@ class WorkMode(QObject):
             self.stop()
             return
         self.operations = 0
+        self._burst_inputs = 0
+        self._next_greeting = 0.0
         self.window.work_mode_active = True
         self.window.stop_waddle()
         self.rig.set_work_mode(True)
@@ -64,6 +73,7 @@ class WorkMode(QObject):
         self.window.work_mode_active = False
         self._input_timer.stop()
         self._gesture_timer.stop()
+        self._pause_timer.stop()
         count, _ = self.work_input.stop()
         self.operations += count
         self.rig.set_work_mode(False)
@@ -75,10 +85,22 @@ class WorkMode(QObject):
         count, gesture = self.work_input.take()
         self.operations += count
         self._refresh_bubble()
+        if count:
+            self._burst_inputs += count
+            self._pause_timer.start()
+            if self.rig.social.kind == "stretch":
+                self.rig.social.clear()
         if gesture is not None:
             action, direction = gesture
             self.rig.set_work_action(action, direction)
             self._gesture_timer.start(550 if action == "typing" else 680)
+
+    def _on_pause(self):
+        inputs, self._burst_inputs = self._burst_inputs, 0
+        now = time.monotonic()
+        if self.active and inputs >= 8 and now >= self._next_greeting:
+            if self.rig.social.greet_after_work():
+                self._next_greeting = now + 120
 
     def _refresh_bubble(self):
         text = f"工作模式\n操作 {self.operations:,} 次"

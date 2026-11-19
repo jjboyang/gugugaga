@@ -55,6 +55,10 @@ class PetWindow(QWidget):
     character_switch_requested = Signal()
     pomodoro_requested = Signal()
     work_mode_requested = Signal()
+    feed_requested = Signal()
+    snack_given = Signal(QPoint)
+    toast_clicked = Signal()
+    joke_answered = Signal()
     come_here_requested = Signal()
     face_tapped = Signal(str, int)
     pet_tapped = Signal()
@@ -122,6 +126,8 @@ class PetWindow(QWidget):
         # characters retain the original whole-image drag rotation below.
         self._rig_handles_sway = False
         # Belly triple-tap easter egg
+        self.cup_offered = False
+        self.snack_offered = False
         self._character = "dafeiyu"
         self._last_reply_text = None
         self._belly_tap_times = []
@@ -390,6 +396,12 @@ class PetWindow(QWidget):
                 pos = event.position().toPoint()
                 x, y = pos.x() / self.width(), pos.y() / self.height()
                 if self._character == "dafeiyu":
+                    if self.snack_offered and self.at_mouth(pos):
+                        self.snack_given.emit(pos)
+                        return
+                    if self.cup_offered and 0.36 <= x <= 0.64 and 0.69 <= y <= 0.87:
+                        self.toast_clicked.emit()
+                        return
                     y += self.face_rise_ratio
                     if 0.32 <= x <= 0.68 and 0.58 <= y <= 0.73:
                         self.face_tapped.emit("cheek", -1 if x < 0.5 else 1)
@@ -400,6 +412,10 @@ class PetWindow(QWidget):
                         return
                 self.pet_tapped.emit()
                 self._check_belly_tap(pos)
+
+    def at_mouth(self, pos):
+        x, y = pos.x() / self.width(), pos.y() / self.height()
+        return ((x - 0.5) / 0.13) ** 2 + ((y - 0.69) / 0.085) ** 2 <= 1
 
     # --- Belly triple-tap easter egg ---
     _BELLY_Y_MIN_RATIO = 0.55
@@ -420,28 +436,34 @@ class PetWindow(QWidget):
             self._belly_tap_times.clear()
             reply = choose_reply(self._character, self._last_reply_text)
             self._last_reply_text = reply.text
-            self._show_speech_bubble(reply)
+            answer = {"deep deep": "seek seek", "seek seek": "deep deep"}.get(reply.text, "")
+            self._show_speech_bubble(reply, answer=answer)
 
-    def say(self, text, mood):
-        self._show_speech_bubble(Reply(text, mood))
+    def say(self, text, mood, *, hold_ms=None):
+        return self._show_speech_bubble(Reply(text, mood), hold_ms=hold_ms)
 
-    def _show_speech_bubble(self, reply):
+    def _show_speech_bubble(self, reply, *, answer="", hold_ms=None):
         """Replace the previous reply without an old timer hiding the new one."""
         self._dismiss_speech_bubble()
         if isinstance(reply, str):
             reply = Reply(reply, "bubbles")
-        popup = SpeechBubble(reply, self._character, self._pet_size, self)
+        popup = SpeechBubble(reply, self._character, self._pet_size, self, answer=answer, hold_ms=hold_ms)
+        if answer:
+            popup.answered.connect(self.joke_answered)
         self._speech_popup = popup
         popup.dismissed.connect(lambda: self._speech_dismissed(popup))
         self._position_speech_bubble()
         popup.show()
+        return popup
 
     def _position_speech_bubble(self):
         popup = getattr(self, "_speech_popup", None)
         if popup is not None:
             screen = self.screen() or QGuiApplication.primaryScreen()
             if screen:
-                popup.place(self.frameGeometry(), screen.availableGeometry())
+                timer = getattr(self, "pomodoro", None)
+                avoid = timer.badge.geometry() if timer and timer.badge.isVisible() else None
+                popup.place(self.frameGeometry(), screen.availableGeometry(), avoid)
 
     def _speech_dismissed(self, popup):
         if self._speech_popup is popup:
@@ -601,6 +623,10 @@ class PetWindow(QWidget):
             call_btn.setToolTip("选中后，把鼠标移到想让大肥鱼坐下的位置")
             call_btn.clicked.connect(lambda: self._on_menu_action(popup, "call"))
             layout.addWidget(call_btn)
+            feed_btn = QPushButton("收起小鱼干" if self.snack_offered else "递小鱼干")
+            feed_btn.setCursor(Qt.PointingHandCursor)
+            feed_btn.clicked.connect(lambda: self._on_menu_action(popup, "feed"))
+            layout.addWidget(feed_btn)
 
         character_btn = QPushButton("切换角色：企鹅 / 大肥鱼")
         character_btn.setCursor(Qt.PointingHandCursor)
@@ -667,6 +693,8 @@ class PetWindow(QWidget):
         popup.close()
         if action == "settings":
             self._show_settings_popup()
+        elif action == "feed":
+            self.feed_requested.emit()
         elif action == "call":
             self.come_here_requested.emit()
         elif action == "character":

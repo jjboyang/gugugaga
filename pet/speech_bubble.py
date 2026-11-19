@@ -5,9 +5,9 @@ from dataclasses import dataclass
 import random
 import sys
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QPushButton, QWidget
 
 
 @dataclass(frozen=True)
@@ -34,13 +34,17 @@ def choose_reply(character, previous_text=None):
 
 class SpeechBubble(QWidget):
     dismissed = Signal()
+    answered = Signal()
     HOLD_MS = 2400
 
-    def __init__(self, reply, character="dafeiyu", pet_size=140, parent=None):
+    def __init__(self, reply, character="dafeiyu", pet_size=140, parent=None, *, answer="", hold_ms=None):
         flags = (Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
-                 | Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput)
+                 | Qt.WindowDoesNotAcceptFocus)
+        if not answer:
+            flags |= Qt.WindowTransparentForInput
         flags |= Qt.Window if sys.platform == "darwin" else Qt.Tool
         super().__init__(parent, flags)
+        self.hold_ms = hold_ms if hold_ms is not None else self.HOLD_MS * (2 if answer else 1)
         self.reply = reply
         self.character = character
         self.tail_on_top = False
@@ -49,7 +53,7 @@ class SpeechBubble(QWidget):
         self._closing = False
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, not bool(answer))
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setFocusPolicy(Qt.NoFocus)
 
@@ -60,6 +64,22 @@ class SpeechBubble(QWidget):
         metrics = QFontMetrics(self._font)
         self.setFixedSize(metrics.horizontalAdvance(reply.text) + 82,
                           max(44, metrics.height() + 20) + 24)
+        self.answer_button = None
+        if answer:
+            button = QPushButton(answer, self)
+            button.setAccessibleName("接梗：" + answer)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setFont(self._font)
+            button.setStyleSheet("""
+                QPushButton {color:#245783; background:#e4f1ff; border:1px solid #afcde6;
+                             border-radius:10px; padding:1px 8px;}
+                QPushButton:hover {background:#d1e8ff;}
+            """)
+            button.adjustSize()
+            button.clicked.connect(self._answer)
+            self.setFixedWidth(self.width() + button.width() + 4)
+            self.answer_button = button
         self.tail_x = self.width() / 2
 
         self._animation = QVariantAnimation(self)
@@ -76,7 +96,13 @@ class SpeechBubble(QWidget):
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
         self._animation.start()
-        self._hold_timer.start(self.HOLD_MS)
+        self._hold_timer.start(self.hold_ms)
+
+    def _answer(self):
+        if self.isVisible() and self.answer_button.isEnabled():
+            self.answer_button.setEnabled(False)
+            self.answered.emit()
+            self.close()
 
     def _set_progress(self, value):
         self._progress = float(value)
@@ -102,7 +128,7 @@ class SpeechBubble(QWidget):
         self.dismissed.emit()
         super().closeEvent(event)
 
-    def place(self, pet_geometry, available):
+    def place(self, pet_geometry, available, avoid=None):
         """Stay inside the current monitor, pointing back toward the pet."""
         gap_anchor = pet_geometry.top() + round(pet_geometry.height() * 0.18)
         x = pet_geometry.center().x() - self.width() // 2
@@ -112,8 +138,19 @@ class SpeechBubble(QWidget):
             y = pet_geometry.bottom() + 2
         x = max(available.left() + 4, min(x, available.right() - self.width() - 3))
         y = max(available.top() + 4, min(y, available.bottom() - self.height() - 3))
+        if avoid is not None and QRect(x, y, self.width(), self.height()).intersects(avoid):
+            above = min(y, avoid.top() - self.height() - 2)
+            if above >= available.top() + 4:
+                y, self.tail_on_top = above, False
+            else:
+                y = min(available.bottom() - self.height() - 3, max(avoid.bottom(), pet_geometry.bottom()) + 3)
+                self.tail_on_top = True
         self.tail_x = max(30.0, min(self.width() - 30.0, pet_geometry.center().x() - x))
         self.move(x, y)
+        if self.answer_button:
+            body_center = (16 if self.tail_on_top else 6) + (self.height() - 24) // 2
+            button = self.answer_button
+            button.move(self.width() - 17 - button.width(), body_center - button.height() // 2)
         self.update()
 
     def paintEvent(self, event):

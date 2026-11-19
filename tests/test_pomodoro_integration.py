@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtCore import QPoint, QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -157,6 +157,59 @@ class PomodoroIntegrationTests(unittest.TestCase):
         self.select_menu("结束工作模式")
         self.assertTrue(self.model.running)
         self.assertEqual(self.rig.pomodoro_mode, "focus")
+
+    def test_work_pause_greets_once_after_a_burst_then_resumes_on_input(self):
+        self.select_menu("开启工作模式")
+        self.work_input.take.return_value = (7, ("typing", 0))
+        self.work._poll_input()
+        self.work._on_pause()
+        self.assertFalse(self.rig.social.kind)
+        self.work_input.take.return_value = (8, ("typing", 0))
+        self.work._poll_input()
+        self.assertEqual(self.work._pause_timer.interval(), 6000)
+        self.work._on_pause()
+        self.assertEqual(self.rig.social.kind, "stretch")
+        with patch.object(self.rig.pomodoro_renderer, "texture", wraps=self.rig.pomodoro_renderer.texture) as texture:
+            self.rig._paint(1)
+            self.assertEqual(texture.call_args.args[0], "work_stretch")
+        self.work._poll_input()
+        self.assertFalse(self.rig.social.kind)
+        self.work._on_pause()
+        self.assertFalse(self.rig.social.kind)
+        self.work.stop()
+        self.assertFalse(self.work._pause_timer.isActive())
+
+    def test_focus_completion_offers_real_clickable_cup_even_during_work(self):
+        self.start_focus()
+        self.select_menu("开启工作模式")
+        self.advance(1500)
+        self.assertEqual(self.rig.social.kind, "bell")
+        self.rig._paint(1.2)
+        self.assertTrue(self.window.cup_offered)
+        size = self.window.width()
+        QTest.mouseClick(self.window, Qt.LeftButton, pos=QPoint(size // 2, round(size * 0.77)))
+        with patch.object(self.rig.pomodoro_renderer, "paint", wraps=self.rig.pomodoro_renderer.paint) as paint:
+            self.rig._paint(0.45)
+            self.assertEqual(paint.call_args.args[1], "clink")
+        self.assertFalse(self.window.cup_offered)
+        self.assertEqual(self.window._speech_popup.reply.text, "叮！辛苦啦")
+        self.advance(30)
+        self.assertEqual(self.model.phase, "focus_done")
+        self.assertEqual(self.model.stats()["today_pomodoros"], 1)
+        self.controller.panel.primary_button.click()
+        self.assertEqual(self.model.phase, "break")
+        self.assertTrue(self.work.active)
+        self.assertFalse(self.rig.social.kind)
+
+    def test_unanswered_toast_expires_and_does_not_replay(self):
+        self.start_focus()
+        self.advance(1500)
+        self.rig._paint(1.2)
+        self.rig._paint(8.1)
+        self.advance(60)
+        self.assertFalse(self.window.cup_offered)
+        self.assertFalse(self.rig.social.kind)
+        self.assertEqual(self.model.phase, "focus_done")
 
     def test_closed_panel_keeps_counting_and_badge_tracks_pet(self):
         self.start_focus()

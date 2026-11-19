@@ -22,6 +22,7 @@ from pet.companion import CallWalk, FaceReaction
 from pet.idle_behavior import IdleBehavior
 from pet.attention_renderer import AttentionRenderer
 from pet.pomodoro_renderer import PomodoroRenderer
+from pet.social_gestures import SocialGestures
 
 
 class RigRenderer(OriginalMeshRenderer):
@@ -420,6 +421,7 @@ class RigAnimator(QObject):
         self._walk_origin = None
         self.call = None
         self.face = FaceReaction()
+        self.social = SocialGestures(self)
         self.enabled = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -466,12 +468,15 @@ class RigAnimator(QObject):
             self.notify_user_activity()
 
     def set_work_action(self, action=None, direction=0):
+        if action and self.social.kind == "stretch":
+            self.social.clear()
         if (action, direction) != (self.work_action, self._scroll_direction):
             self._work_elapsed = 0.0
         self.work_action = action
         self._scroll_direction = direction
 
     def cancel_interaction(self):
+        self.social.clear()
         self.call = None
         self.face.clear()
 
@@ -480,11 +485,13 @@ class RigAnimator(QObject):
             self.engine.notify_user_activity()
             self.notify_user_activity()
             self.face.clear()
+            self.social.clear()
             self.call = CallWalk()
             self.window.say("鼠标指一下，我就来", "bubbles")
 
     def touch_face(self, region, side):
         if self.enabled and self.engine.current_phase != "angry":
+            self.social.clear()
             if self.face.tap(region, side):
                 self.window.say("别吵别吵", "hush")
 
@@ -492,6 +499,7 @@ class RigAnimator(QObject):
         if self.enabled:
             self.notify_user_activity()
             self.face.clear()
+            self.social.clear()
             self.motion.tap()
 
     def notify_user_activity(self):
@@ -505,6 +513,7 @@ class RigAnimator(QObject):
         if self.enabled:
             self.notify_user_activity()
             self.face.clear()
+            self.social.clear()
             self.motion.begin_drag()
             self._last_tick = time.monotonic()
             self._paint(0.0)
@@ -540,7 +549,9 @@ class RigAnimator(QObject):
         dragging = getattr(self.window, "_dragging", False) or self.engine.current_phase == "dragged"
         if dragging or not self.window.isVisible() or elapsed > IdleBehavior.RESUME_GAP_S:
             self.cancel_interaction()
-        interacting = bool(self.call or self.face.kind)
+        if self.social.kind:
+            self.social.advance(elapsed, cursor)
+        interacting = bool(self.call or self.face.kind or self.social.kind)
         work = self.work_mode and not (dragging or interacting)
         pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting)
         paused = pomodoro and self.pomodoro_paused
@@ -572,7 +583,10 @@ class RigAnimator(QObject):
         self.window.face_rise_ratio = pose.walk_blend * self.renderer._WALK_RISE / self.renderer.size[1]
         if self.face.kind:
             self.face.apply(pose, elapsed)
-        if work:
+        illustrated = {"bell": "focus_done", "cup": "toast", "clink": "clink", "stretch": "work_stretch"}.get(self.social.kind)
+        if illustrated:
+            mode, animation_time = illustrated, self.social.age
+        elif work:
             mode = {None: "work_idle", "typing": "work_typing", "scroll": "work_scroll"}[self.work_action]
             self._work_elapsed += elapsed
             animation_time = self._work_elapsed
@@ -584,7 +598,7 @@ class RigAnimator(QObject):
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
-        if work or pomodoro:
+        if illustrated or work or pomodoro:
             self.pomodoro_renderer.apply_pose(pose, mode, animation_time, paused=paused)
             texture = self.pomodoro_renderer.texture(
                 mode, animation_time, eye_open=pose.eye_open,
@@ -603,7 +617,14 @@ class RigAnimator(QObject):
             if pomodoro:
                 self._pomodoro_frame = QPixmap(pixmap)
         else:
-            pixmap = self.renderer.render(pose, scale=scale)
+            texture = None
+            deformer = None
+            if self.social.kind:
+                self.social.apply_pose(pose)
+                if self.social.kind == "eat":
+                    texture = self.social.eating_texture(self.renderer._awake_texture(pose))
+                    deformer = self.social.lift_snack
+            pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
         self.frame_changed.emit(pixmap)
 
     def _idle_blocked(self):

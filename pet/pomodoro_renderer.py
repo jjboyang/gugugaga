@@ -31,7 +31,7 @@ class PomodoroRenderer:
     """
 
     MODES = frozenset((
-        "idle", "work_idle", "work_typing", "work_scroll", "focus", "focus_done", "break", "break_done", "activity",
+        "idle", "work_idle", "work_typing", "work_scroll", "focus", "focus_done", "break", "break_done", "activity", "toast", "clink", "work_stretch",
     ))
 
     def __init__(self, asset_dir=None):
@@ -48,6 +48,8 @@ class PomodoroRenderer:
 
     @staticmethod
     def _stretch_weight(mode, t):
+        if mode == "work_stretch":
+            return _smooth(t / 0.35) * (1 - _smooth((t - 2.15) / 0.45))
         if mode in ("break_done", "activity"):
             return 1.0
         if mode != "break":
@@ -155,16 +157,17 @@ class PomodoroRenderer:
         weight = self._stretch_weight(mode, t)
         if weight >= 1:
             return self._stretch()
-        coffee = self._with_blink(self._artwork("coffee"), "coffee", eye_open)
+        base_name = "focus" if mode == "work_stretch" else "coffee"
+        base = self._with_blink(self._artwork(base_name), base_name, eye_open)
         if weight <= 0:
-            return coffee
+            return base
         # Premultiplied additive blending avoids dark fringes or a doubled
         # opaque face while the two similarly aligned drawings crossfade.
         result = QPixmap(512, 512)
         result.fill(Qt.transparent)
         painter = QPainter(result)
         painter.setCompositionMode(QPainter.CompositionMode_Plus)
-        for art, opacity in ((coffee, 1 - weight), (self._stretch(), weight)):
+        for art, opacity in ((base, 1 - weight), (self._stretch(), weight)):
             painter.setOpacity(opacity)
             painter.drawPixmap(0, 0, art)
         painter.end()
@@ -239,6 +242,9 @@ class PomodoroRenderer:
         if mode == "focus_done":
             angle = math.radians(self._ring(t) * 7)
             cx, cy, rx, ry = 326.0, 381.0, 38.0, 65.0
+        elif mode in {"toast", "clink"}:
+            lift = 10 * _smooth(t / 0.34) if mode == "toast" else 10 + 12 * math.exp(-((t - 0.46) / 0.21) ** 2)
+            cx, cy, rx, ry = 258.0, 400.0, 72.0, 48.0
         elif mode == "break":
             lift = self._sip(t) * (1 - self._stretch_weight(mode, t)) * 13
             cx, cy, rx, ry = 258.0, 400.0, 61.0, 40.0
@@ -280,10 +286,46 @@ class PomodoroRenderer:
             weight = 1 - self._stretch_weight(mode, t)
             if weight > 0:
                 self._steam(painter, t, weight)
+        elif mode == "clink":
+            self._clink(painter, t)
         elif mode == "focus_done":
             self._chime(painter, t)
         painter.end()
         return result
+
+    @staticmethod
+    def _clink(p, t):
+        # A second little enamel cup meets the rim of the illustrated one.
+        approach = _smooth(t / 0.44) * (1 - _smooth((t - 0.62) / 0.56))
+        if approach <= 0:
+            return
+        p.save()
+        p.setOpacity(approach)
+        p.translate(375 - 73 * approach, 414 - 41 * approach)
+        p.rotate(-18 * approach)
+        p.setPen(QPen(QColor("#527089"), 2.5))
+        p.setBrush(QColor("#e1eff6"))
+        p.drawEllipse(QRectF(14, -8, 13, 14))
+        cup = QPainterPath(QPointF(-21, -13))
+        cup.lineTo(-17, 10)
+        cup.quadTo(-1, 23, 16, 10)
+        cup.lineTo(21, -13)
+        cup.closeSubpath()
+        p.drawPath(cup)
+        p.setBrush(QColor("#ad784d"))
+        p.drawEllipse(QRectF(-21, -17, 42, 9))
+        p.setBrush(QColor("#84b6d0"))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(0, 0), 3, 3)
+        p.restore()
+        pulse = math.exp(-((t - 0.48) / 0.10) ** 2)
+        if pulse > 0.02:
+            p.save()
+            p.setOpacity(pulse)
+            p.setPen(QPen(QColor("#e6b453"), 3, Qt.SolidLine, Qt.RoundCap))
+            for dx, dy in ((-5, -8), (2, -11), (9, -6)):
+                p.drawLine(QPointF(280 + dx, 357 + dy), QPointF(280 + 1.7 * dx, 357 + 1.7 * dy))
+            p.restore()
 
     def _steam(self, p, t, opacity):
         # Fine desaturated blue-white wisps read on light and dark desktops.

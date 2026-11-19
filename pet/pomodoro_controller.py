@@ -74,14 +74,17 @@ class PomodoroController(QObject):
         self.panel.activateWindow()
 
     def _on_action(self, events):
-        self._handle_events(events or [])
         self.refresh()
+        self._handle_events(events or [])
 
     def _tick(self):
-        self._handle_events(self.model.tick())
+        events = self.model.tick()
         self.refresh()
+        self._handle_events(events)
 
     def _handle_events(self, events):
+        if "focus_done" in events:
+            self.rig.social.invite_toast()
         if any(event in {"focus_done", "break_done", "activity_due"} for event in events):
             QApplication.beep()
             QApplication.alert(self.window, 5000)

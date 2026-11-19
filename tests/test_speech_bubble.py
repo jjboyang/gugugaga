@@ -56,7 +56,8 @@ class SpeechBubbleTests(unittest.TestCase):
     def test_repeated_taps_deliver_every_click_and_replace_the_reply(self):
         clicks = []
         self.window.pet_tapped.connect(lambda: clicks.append(True))
-        self.tap_belly()
+        with patch("pet.window.choose_reply", return_value=DAFEIYU_REPLIES[0]):
+            self.tap_belly()
         first = self.window._speech_popup
         self.assertTrue(first.isVisible())
         self.assertNotEqual(first.windowType(), Qt.Popup)
@@ -71,7 +72,7 @@ class SpeechBubbleTests(unittest.TestCase):
         self.assertNotEqual(second.reply.text, first.reply.text)
 
     def test_new_reply_gets_its_own_full_lifetime_then_dismisses(self):
-        with patch.object(SpeechBubble, "HOLD_MS", 180):
+        with patch.object(SpeechBubble, "HOLD_MS", 180), patch("pet.window.choose_reply", return_value=DAFEIYU_REPLIES[0]):
             self.tap_belly()
             QTest.qWait(120)
             self.tap_belly()

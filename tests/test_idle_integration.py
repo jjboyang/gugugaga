@@ -300,6 +300,65 @@ class IdleIntegrationTests(unittest.TestCase):
         self.assertEqual(self.window.pos(), position)
         self.mouse(QEvent.MouseButtonRelease, start + QPoint(35, 0))
 
+    def test_food_follows_pointer_then_transfers_only_at_mouth(self):
+        self.window.contextMenuEvent(None)
+        popup = self.app.activePopupWidget()
+        next(b for b in popup.findChildren(QPushButton) if b.text() == "递小鱼干").click()
+        social = self.rig.social
+        food = social.pointer_food
+        mouth = self.window.mapToGlobal(QPoint(self.window.width() // 2, round(self.window.height() * 0.69)))
+        with patch("pet.rig_animator.QCursor.pos", return_value=mouth - QPoint(100, 0)) as cursor:
+            self.paint(0.8)
+            self.assertTrue(food.isVisible())
+            self.assertTrue(food.windowFlags() & Qt.WindowTransparentForInput)
+            self.assertLess((food.geometry().center() - cursor.return_value).manhattanLength(), 3)
+            cursor.return_value = mouth
+            self.paint(0.2)
+            self.assertEqual(social.kind, "offer_food")
+            with patch("pet.social_gestures.random.random", return_value=0.05):
+                self.paint(0.2)
+            self.assertFalse(food.isVisible())
+            self.assertEqual(social.kind, "eat")
+            self.paint(2.4)
+            self.assertEqual(self.window._speech_popup.reply.text, "嗝……还有吗？")
+            self.paint(1.5)
+            self.assertFalse(social.kind)
+
+    def test_cancel_food_and_click_to_feed_do_not_trigger_cheek_or_belly(self):
+        social = self.rig.social
+        self.window.feed_requested.emit()
+        self.window.feed_requested.emit()
+        self.assertFalse(social.kind)
+        self.window.feed_requested.emit()
+        size = self.window.width()
+        QTest.mouseClick(self.window, Qt.LeftButton, pos=QPoint(size // 2, round(size * 0.69)))
+        self.assertEqual(social.kind, "eat")
+        self.assertFalse(self.rig.face.kind)
+        self.window.character_switch_requested.emit()
+        self.assertFalse(self.window.snack_offered)
+        self.window.feed_requested.emit()
+        self.assertFalse(social.kind)
+
+    def test_both_catchphrases_accept_the_other_line_once_then_laugh(self):
+        from pet.speech_bubble import Reply
+        size = self.window.width()
+        for line, answer in (("deep deep", "seek seek"), ("seek seek", "deep deep")):
+            with patch("pet.window.choose_reply", return_value=Reply(line, "bubbles")):
+                for _ in range(3):
+                    QTest.mouseClick(self.window, Qt.LeftButton, pos=QPoint(size // 2, size * 3 // 4))
+            bubble = self.window._speech_popup
+            self.assertEqual(bubble.answer_button.text(), answer)
+            QTest.mouseClick(bubble.answer_button, Qt.LeftButton)
+            self.assertFalse(bubble.isVisible())
+            self.assertEqual(self.rig.social.kind, "laugh")
+            self.paint(0.17)
+            self.assertIsNone(self.window._speech_popup)
+            self.paint(0.55)
+            self.assertLess(self.last_pose.eye_open, 0.1)
+            self.assertEqual(self.window._speech_popup.reply.text, "嘿嘿，对上啦")
+            self.paint(2.0)
+            self.assertFalse(self.rig.social.kind)
+
     def test_fish_has_time_for_idle_gestures_and_longer_anger_without_changing_penguin(self):
         self.assertGreaterEqual(self.engine._idle_to_sleep_ms, 100000)
         self.assertGreaterEqual(self.engine.angry_hold_ms, 3000)
