@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from pet.window import PetWindow
 from pet.animation import AnimationEngine
+from pet.exploration_controller import ExplorationController
 from pet.ipc import PetIPC
 from pet.rig_animator import RigAnimator
 from pet.pomodoro_controller import PomodoroController
@@ -177,6 +178,10 @@ def main():
     window.pomodoro = pomodoro
     app.aboutToQuit.connect(pomodoro.shutdown)
     work = WorkMode(window, rig)
+    exploration = ExplorationController(
+        window, rig, work, is_active=lambda: selected_character[0] == "dafeiyu",
+    )
+    app.aboutToQuit.connect(exploration.shutdown)
     app.aboutToQuit.connect(work.stop)
 
     ipc = PetIPC()

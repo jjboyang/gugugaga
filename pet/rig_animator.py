@@ -413,6 +413,8 @@ class RigAnimator(QObject):
         self.work_mode = False
         self.work_action = None
         self._work_elapsed = 0.0
+        self._exploring = False
+        self._exploration_elapsed = 0.0
         self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
         self._pomodoro_frame = None
@@ -474,6 +476,14 @@ class RigAnimator(QObject):
             self._work_elapsed = 0.0
         self.work_action = action
         self._scroll_direction = direction
+
+    def set_exploring(self, active):
+        self._exploring = active
+        self._exploration_elapsed = 0.0
+
+    def can_show_exploration(self):
+        return (self.enabled and self.engine.current_phase in {"idle", "sleep"}
+                and not (self.call or self.face.kind or self.social.kind or self._idle_blocked()))
 
     def cancel_interaction(self):
         self.social.clear()
@@ -554,11 +564,12 @@ class RigAnimator(QObject):
         interacting = bool(self.call or self.face.kind or self.social.kind)
         work = self.work_mode and not (dragging or interacting)
         pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting)
+        exploring = self._exploring and not dragging and self.can_show_exploration()
         paused = pomodoro and self.pomodoro_paused
         if paused and self._pomodoro_frame is not None:
             self.frame_changed.emit(self._pomodoro_frame)
             return
-        phase = "dragged" if dragging else "idle" if work or pomodoro or interacting else self.engine.current_phase or "idle"
+        phase = "dragged" if dragging else "idle" if work or pomodoro or interacting or exploring else self.engine.current_phase or "idle"
         if self.call:
             cue = self.call.advance(elapsed, self.window, cursor)
             if self.call.finished:
@@ -567,7 +578,7 @@ class RigAnimator(QObject):
                 self.call = None
                 self.idle_behavior.notify_activity()
         else:
-            blocked = interacting or self._idle_blocked()
+            blocked = interacting or exploring or self._idle_blocked()
             room = self._walk_room() if phase == "idle" and not blocked else None
             cue = self.idle_behavior.step(
                 elapsed, phase, blocked=blocked, walk_room=room,
@@ -595,10 +606,14 @@ class RigAnimator(QObject):
             if not paused:
                 self._pomodoro_elapsed += elapsed
             animation_time = self._pomodoro_elapsed
+        elif exploring:
+            mode = "work_scroll"
+            self._exploration_elapsed += elapsed
+            animation_time = self._exploration_elapsed
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
-        if illustrated or work or pomodoro:
+        if illustrated or work or pomodoro or exploring:
             self.pomodoro_renderer.apply_pose(pose, mode, animation_time, paused=paused)
             texture = self.pomodoro_renderer.texture(
                 mode, animation_time, eye_open=pose.eye_open,
@@ -606,7 +621,7 @@ class RigAnimator(QObject):
             pixmap = self.renderer.render(
                 pose, scale=scale, texture=texture,
                 vertex_deformer=lambda vertices: self.pomodoro_renderer.deform_vertices(
-                    vertices, mode, animation_time, scroll_direction=self._scroll_direction,
+                    vertices, mode, animation_time, scroll_direction=1 if exploring else self._scroll_direction,
                 ),
             )
             pixmap = self.pomodoro_renderer.paint(

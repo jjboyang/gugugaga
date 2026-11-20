@@ -86,6 +86,45 @@ python scripts/preview-pomodoro.py --export-dir preview/pomodoro
 
 导出不连接 IPC、不读写专注数据；生成 `overview.png`、四种姿势 PNG 和 16 秒的 `animation.gif`。可用 `--seconds`、`--fps` 调整长度与帧率。
 
+### 大肥鱼的探索日记
+
+右键大肥鱼，打开「她在干嘛」→「Agent 连接」。添加 **OpenAI Responses · 网页搜索**，填入支持网页搜索的模型和 API Key，再点「去逛一会儿」。探索记录会显示大肥鱼的想法、她读到的内容和来源链接。她有了想接着查的问题，会留到下一次。
+
+要让她自行探索，为连接勾选「允许大肥鱼在后台自主调用」，并保存「自动探索」设置。桌宠运行时，约十分钟没有和她互动，她就可以自行探索。两轮后台探索至少间隔十五分钟。每日上限按已发出的 API 请求计数，默认三次，手动探索也计入。她会在你点她时分享新发现。最近十四天内，如果有三天你在结束工作模式后五分钟内点过她，她也会在忙完后偶尔主动分享，每天最多一次。
+
+探索记录和连接设置保存在 `~/.desktop-pet/exploration.sqlite3`。可以用 `DESKTOP_PET_EXPLORATION_PATH` 指定其他位置。API Key 保存到系统钥匙串，带 Key 的连接需要可用的系统凭据服务。
+
+#### 接入自定义 Agent
+
+如果你在 Dify 发布了新版 Agent，选择「Dify Agent」，填写应用的 API Key、以 `/chat-messages` 结尾的 API 地址，以及网页或视频能力。Agent 要有对应的搜索工具，应用的输入变量可以留空。大肥鱼会把这次想找的内容交给它，并读取流式回复里的最终结果。
+
+在「Agent 连接」选择「自定义 Agent · HTTP JSON」，填写能接收以下格式的服务地址、Agent 标识和网页或视频能力。现有平台的 API 可以通过一个轻量的服务转换为此格式。桌宠使用 HTTP POST，填了 API Key 时会带上 Bearer 凭据。
+
+```json
+{
+  "agent": "video-finder",
+  "capability": "video",
+  "topic": "海鸟怎样停在栏杆上",
+  "previous": {},
+  "locale": "zh-CN"
+}
+```
+
+`previous` 带上一次探索的 `url` 和 `reaction`，首次或更换话题时为空。服务返回一条实际找到的内容：
+
+```json
+{
+  "url": "https://example.org/coast/video",
+  "title": "一段海岸影像",
+  "evidence_kind": "metadata",
+  "observation": "简介提到海鸟停在栏杆上。",
+  "reaction": "我想看看它在大风里的动作。",
+  "next_topic": "海鸟在大风里是怎么站稳的"
+}
+```
+
+`evidence_kind` 可填 `article`（网页正文）、`metadata`（标题或简介）或 `transcript`（可读取的字幕或转写）。视频能力用后两种。`next_topic` 为空时，大肥鱼可以去找新的话题。
+
 ### 配置 Claude Code Hook
 
 右键点击企鹅 → **配置Hook**，自动将 Hook 写入 `~/.claude/settings.json`。重启 Claude Code 即可生效。

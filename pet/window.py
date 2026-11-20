@@ -55,6 +55,7 @@ class PetWindow(QWidget):
     character_switch_requested = Signal()
     pomodoro_requested = Signal()
     work_mode_requested = Signal()
+    exploration_requested = Signal()
     feed_requested = Signal()
     snack_given = Signal(QPoint)
     toast_clicked = Signal()
@@ -627,6 +628,10 @@ class PetWindow(QWidget):
             feed_btn.setCursor(Qt.PointingHandCursor)
             feed_btn.clicked.connect(lambda: self._on_menu_action(popup, "feed"))
             layout.addWidget(feed_btn)
+            exploration_btn = QPushButton("她在干嘛", popup)
+            exploration_btn.setCursor(Qt.PointingHandCursor)
+            exploration_btn.clicked.connect(lambda: self._on_menu_action(popup, "exploration"))
+            layout.addWidget(exploration_btn)
 
         character_btn = QPushButton("切换角色：企鹅 / 大肥鱼")
         character_btn.setCursor(Qt.PointingHandCursor)
@@ -703,6 +708,8 @@ class PetWindow(QWidget):
             self.pomodoro_requested.emit()
         elif action == "work":
             self.work_mode_requested.emit()
+        elif action == "exploration":
+            self.exploration_requested.emit()
         elif action == "hook":
             self.hook_config_requested.emit()
         elif action == "quit":

@@ -4,13 +4,15 @@ from __future__ import annotations
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from pet.work_input import WorkInput
 
 
 class WorkMode(QObject):
+    active_changed = Signal(bool)
+
     def __init__(self, window, rig, *, work_input=None):
         super().__init__(window)
         self.window = window
@@ -66,6 +68,7 @@ class WorkMode(QObject):
         self._input_timer.start()
         self._refresh_bubble()
         self.bubble.setVisible(self.window.isVisible())
+        self.active_changed.emit(True)
 
     def stop(self):
         if not self.active:
@@ -78,6 +81,7 @@ class WorkMode(QObject):
         self.operations += count
         self.rig.set_work_mode(False)
         self.bubble.hide()
+        self.active_changed.emit(False)
 
     def _poll_input(self):
         if not self.active:
