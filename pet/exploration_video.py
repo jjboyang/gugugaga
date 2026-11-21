@@ -25,6 +25,11 @@ VIDEO_TIMEOUT = 57
 SAMPLE_SECONDS = 18
 FRAME_STEP = 6
 MAX_SUBTITLE_BYTES = 512 * 1024
+# Bilibili's CDN rejects the default FFmpeg Lavf User-Agent.
+MEDIA_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 BILIBILI_PATH = re.compile(r"/video/(?:BV[0-9A-Za-z]+|av[0-9]+)/?")
 YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 CUE = re.compile(
@@ -268,8 +273,11 @@ def _captions(info, extractor, windows, cancelled):
 def _input(ffmpeg, url, referer, start, *, remote):
     command = [ffmpeg, "-nostdin", "-loglevel", "error", "-y"]
     if remote:
-        command += ["-protocol_whitelist", "https,tls,tcp", "-format_whitelist", "mov,matroska,webm",
-                    "-tls_verify", "1", "-max_redirects", "0", "-rw_timeout", "6000000", "-referer", referer]
+        command += [
+            "-protocol_whitelist", "https,tls,tcp", "-format_whitelist", "mov,matroska,webm",
+            "-tls_verify", "1", "-max_redirects", "0", "-rw_timeout", "6000000",
+            "-referer", referer, "-user_agent", MEDIA_USER_AGENT,
+        ]
     return command + ["-threads", "2", "-ss", str(start), "-i", str(url)]
 
 

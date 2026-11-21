@@ -108,6 +108,23 @@ class PictureCollectionTests(unittest.TestCase):
 
 
 class VideoCollectionTests(unittest.TestCase):
+    def test_bilibili_video_and_audio_send_a_browser_user_agent_before_the_input(self):
+        video_url = "https://upos.example.bilivideo.com/video.m4s"
+        audio_url = "https://upos.example.bilivideo.com/audio.m4s"
+        cancelled, deadline = threading.Event(), time.monotonic() + 5
+        with TemporaryDirectory() as tmp, patch("pet.exploration_video._run", return_value=None) as run:
+            _frames("ffmpeg", video_url, BILIBILI_URL, 0, 18, Path(tmp), cancelled, deadline)
+            _audio("ffmpeg", audio_url, BILIBILI_URL, 0, 18, Path(tmp), cancelled, deadline)
+
+        self.assertEqual(run.call_count, 2)
+        for call, url in zip(run.call_args_list, (video_url, audio_url)):
+            command = call.args[0]
+            input_at = command.index("-i")
+            self.assertIn("-user_agent", command[:input_at])
+            user_agent_at = command.index("-user_agent")
+            self.assertTrue(command[user_agent_at + 1].startswith("Mozilla/5.0 "))
+            self.assertEqual(command[input_at + 1], url)
+
     def test_caption_times_and_playback_keep_the_original_part(self):
         source = video_page(BILIBILI_URL + "?p=3&spm_id_from=foo")
         self.assertEqual(source, ("BiliBili", BILIBILI_URL + "?p=3"))
