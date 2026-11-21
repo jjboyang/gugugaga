@@ -276,6 +276,9 @@ class AgentHandler(BaseHTTPRequestHandler):
             "/video": VIDEO_RESULT,
             "/deepseek-search": BILIBILI_SEARCH_RESULT,
             "/deepseek-empty": {"results": BILIBILI_SEARCH_RESULT["results"][:2]},
+            "/deepseek-site-search": {"results": [
+                {"url": "https://movie.ysjf.com/", "title": "观影信息发布平台"},
+            ]},
             "/deepseek-bilibili-page": BILIBILI_PAGE,
             "/deepseek-linked-page": LINKED_DOCUMENT,
             "/deepseek-chat": BILIBILI_REACTION,
@@ -497,6 +500,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         websites.address.setText("https://www.example.net/videos")
         websites._add()
         self.assertEqual([site.domain for site in self.controller.diary.websites()], [BILIBILI_DOMAIN, "example.net"])
+        self.assertEqual(self.controller.diary.websites()[-1].link_url, "https://www.example.net/videos")
         websites.close()
 
         send = self.controller.network.post
@@ -570,10 +574,53 @@ class ExplorationIntegrationTests(unittest.TestCase):
             self.assertIn(LINKED_SITE, self.controller.diary.known_website_domains())
             self.controller.start_exploring()
             self.finish_round()
-            self.assertEqual(endpoints[6:], [DEEPSEEK_SEARCH_ENDPOINT])
+            self.assertEqual(endpoints[6:], full_round)
             self.assertTrue(self.server.received[6][1]["query"].endswith("site:example.net"))
-            self.assertIn("没在 example.net 找到合适的公开内容", self.controller.status)
+            url = "https://www.example.net/videos"
+            self.assertEqual(self.server.received[7][1]["url"], url)
+            self.assertEqual(self.controller.diary.recent()[0]["url"], url)
             self.assertIsNone(self.controller.outing)
+
+    def test_bare_domain_retry_without_topic_and_then_falls_back_to_homepage(self):
+        secret = "deepseek-test-key"
+        self.credentials.get.return_value = secret
+        self.assertEqual(self.controller.save_connection(deepseek_connection(), None, secret), "")
+        self.controller.remove_website(BILIBILI_DOMAIN)
+        self.controller.diary.add_website("ysjf.com")
+        site, = self.controller.diary.websites()
+        self.assertEqual(site.link_url, "")
+        send = self.controller.network.post
+        site_search_result = "/deepseek-site-search"
+
+        def fixture_post(request, body):
+            endpoint = request.url().toString()
+            if endpoint == DEEPSEEK_SEARCH_ENDPOINT:
+                query = json.loads(bytes(body))["query"]
+                path = site_search_result if query == "site:ysjf.com" else "/deepseek-empty"
+            elif endpoint == DEEPSEEK_FETCH_ENDPOINT:
+                path = "/deepseek-linked-page"
+            else:
+                self.assertEqual(endpoint, DEEPSEEK_CHAT_ENDPOINT)
+                path = "/deepseek-chat"
+            request.setUrl(QUrl(f"http://127.0.0.1:{self.server.server_port}{path}"))
+            return send(request, body)
+
+        with patch.object(self.controller.network, "post", side_effect=fixture_post):
+            for site_search_result, url in (
+                ("/deepseek-site-search", "https://movie.ysjf.com/"),
+                ("/deepseek-empty", "https://ysjf.com/"),
+            ):
+                self.server.received.clear()
+                self.controller.start_exploring()
+                self.finish_round()
+                self.assertEqual([record[0] for record in self.server.received], [
+                    "/deepseek-empty", site_search_result, "/deepseek-linked-page", "/deepseek-chat",
+                ])
+                topic_query = self.server.received[0][1]["query"]
+                self.assertTrue(topic_query.endswith(" site:ysjf.com"))
+                self.assertEqual(self.server.received[1][1]["query"], "site:ysjf.com")
+                self.assertEqual(self.server.received[2][1]["url"], url)
+                self.assertEqual(self.controller.diary.recent()[0]["url"], url)
 
     def test_vision_rejection_retries_as_text_without_losing_the_note(self):
         secret = "deepseek-test-key"

@@ -32,6 +32,7 @@ from pet.exploration_video import AudioSample, TimedText, VIDEO_TIMEOUT, VideoMa
 IDLE_BEFORE_EXPLORING = 10 * 60
 OUTING_INTERVAL = 15 * 60
 REQUEST_TIMEOUT_MS = 40_000
+SITE_SEARCH_TIMEOUT_MS = 12_000
 FETCH_TIMEOUT_MS = 8_000
 ASR_TIMEOUT_MS = 24_000
 MAX_RESPONSE_BYTES = 512 * 1024
@@ -296,7 +297,8 @@ class ExplorationController(QObject):
         self.reply.setReadBufferSize(MAX_RESPONSE_BYTES + 1)
         self.reply.readyRead.connect(self._read)
         self.reply.finished.connect(self._finished)
-        timeout = {"fetch": FETCH_TIMEOUT_MS, "transcribe": ASR_TIMEOUT_MS}.get(stage, REQUEST_TIMEOUT_MS)
+        timeout = {"site_search": SITE_SEARCH_TIMEOUT_MS, "fetch": FETCH_TIMEOUT_MS,
+                   "transcribe": ASR_TIMEOUT_MS}.get(stage, REQUEST_TIMEOUT_MS)
         self.deadline.start(timeout)
 
     def _read_key(self, agent):
@@ -409,11 +411,19 @@ class ExplorationController(QObject):
             self._refresh()
 
     def _continue_website(self, outing, problem):
-        if outing.stage == "search" and not problem:
-            outing.results = parse_website_search(self.buffer, outing.website)
-            outing.page_url = outing.results[0]["url"] if outing.results else outing.website.link_url
+        if outing.stage in {"search", "site_search"} and not problem:
+            website = outing.website
+            outing.results = parse_website_search(self.buffer, website)
+            outing.page_url = outing.results[0]["url"] if outing.results else website.link_url
+            if not outing.page_url and outing.stage == "site_search":
+                outing.page_url = f"https://{website.domain}/"
+            if not outing.page_url and website.kind == "preset" and website.domain != BILIBILI_DOMAIN:
+                self._post(outing.agent.endpoint, {"query": f"site:{website.domain}", "count": 8}, stage="site_search")
+                self.status = f"刚才的话题没搜到，我在看看 {website.domain} 上的其他内容。"
+                self._refresh()
+                return True
             if not outing.page_url:
-                raise ValueError(f"这次没在 {outing.website.domain} 找到合适的公开内容。")
+                raise ValueError(f"这次没在 {website.domain} 找到合适的公开内容。")
             self._post(DEEPSEEK_FETCH_ENDPOINT, {"url": outing.page_url}, stage="fetch")
             return True
         if outing.stage != "fetch" or self.request_error:
@@ -427,6 +437,8 @@ class ExplorationController(QObject):
                 pass
         if not outing.results:
             if not page:
+                if outing.website.kind == "preset":
+                    raise ValueError(f"这次没能读取 {outing.website.domain} 的页面，可以在「探索网站」试试一条具体网址。")
                 raise ValueError(f"这次没能打开 {outing.website.domain} 的公开页面。")
             outing.results = [{
                 "url": outing.page_url, "title": title or outing.website.domain,

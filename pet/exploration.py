@@ -290,11 +290,17 @@ class ExplorationDiary:
         domain = website_domain(address)
         if not domain:
             raise ValueError("请输入公开网站的网址或域名。")
+        address = address.strip()
+        link_url = ""
+        if address.lower() != domain:
+            parts = read_url(address if "://" in address else "https://" + address)
+            link_url = parts._replace(path=parts.path or "/", fragment="").geturl()
         with self.db:
             self.db.execute("""
-                INSERT INTO exploration_websites (domain, kind) VALUES (?, 'preset')
-                ON CONFLICT (domain) DO UPDATE SET kind = 'preset'
-                """, (domain,))
+                INSERT INTO exploration_websites (domain, kind, link_url) VALUES (?, 'preset', ?)
+                ON CONFLICT (domain) DO UPDATE SET kind = 'preset',
+                    link_url = coalesce(nullif(excluded.link_url, ''), exploration_websites.link_url)
+                """, (domain, link_url))
 
     def remove_website(self, domain):
         with self.db:
