@@ -20,14 +20,15 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from pet.exploration import (
-    Activity, AgentConnection, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
-    Discovery, ExplorationSettings, OPENAI_ENDPOINT,
+    Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
+    Discovery, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
 )
 from pet.exploration_agents import (
-    DEEPSEEK_CHAT_ENDPOINT, build_request, parse_bilibili_reaction, parse_bilibili_search, parse_result,
+    DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, parse_result,
+    parse_website_reaction, parse_website_search, website_links,
 )
 from pet.exploration_controller import ExplorationController, IDLE_BEFORE_EXPLORING
-from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel
+from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
 from pet.window import PetWindow
 
 
@@ -47,6 +48,8 @@ VIDEO_RESULT = {
     "reaction": "这回先收藏一下。",
 }
 BILIBILI_URL = "https://www.bilibili.com/video/BV1TestFish/"
+LINKED_SITE = "birdnotes.example.org"
+LINKED_PAGE = f"https://{LINKED_SITE}/shore"
 BILIBILI_SEARCH_RESULT = {"results": [
     {"url": "https://www.bilibili.com.example.org/video/BV1FakeFish/", "title": "其他网站"},
     {"url": "https://www.bilibili.com/read/cv1", "title": "专栏文章"},
@@ -55,8 +58,14 @@ BILIBILI_SEARCH_RESULT = {"results": [
 ]}
 BILIBILI_REACTION = {"choices": [{"message": {"content": json.dumps(
     {"choice": 1, "reaction": "鲸鲸，想看看是哪种小鸟。", "next_topic": "海边常见小鸟",
-     "url": "https://www.example.org/ignored", "observation": "我看到了未证实的画面。"},
+     "site_choice": 1, "url": "https://www.example.org/ignored", "observation": "我看到了未证实的画面。"},
 )}}]}
+BILIBILI_PAGE = {"title": "海边的小鸟", "content": (
+    f"视频简介推荐了[海边观鸟资料]({LINKED_PAGE}?from=video)。\n"
+    "![截图](https://images.example.net/art.png)\n"
+    "[另一个站内视频](https://www.bilibili.com/video/BV1MoreFish/)"
+)}
+LINKED_DOCUMENT = {"title": "岸边观鸟笔记", "content": "这里整理了岸边常见的小鸟。"}
 
 
 def openai_connection():
@@ -126,18 +135,32 @@ class AgentProtocolTests(unittest.TestCase):
             replace(connection, endpoint=DIFY_ENDPOINT).validate()
         with self.assertRaises(ValueError):
             replace(connection, has_key=False).validate()
-        request = build_request(connection, Activity("海鸟 OR site:example.org", "video", "海鸟"))
-        self.assertTrue(request["query"].endswith(" site:www.bilibili.com"))
+        activity = Activity("海鸟 OR site:example.org", "video", "海鸟")
+        website = ExplorationWebsite(BILIBILI_DOMAIN)
+        request = build_request(connection, activity, website=website)
+        self.assertTrue(request["query"].endswith(" site:bilibili.com"))
         self.assertEqual(request["query"].count("site:"), 1)
-        candidates = parse_bilibili_search(json.dumps(BILIBILI_SEARCH_RESULT))
+        candidates = parse_website_search(json.dumps(BILIBILI_SEARCH_RESULT), website)
         self.assertEqual([entry["url"] for entry in candidates], [BILIBILI_URL])
-        discovery = parse_bilibili_reaction(json.dumps(BILIBILI_REACTION), candidates)
+        links = website_links(BILIBILI_PAGE["content"], [BILIBILI_DOMAIN])
+        self.assertEqual([site["domain"] for site in links], [LINKED_SITE])
+        discovery, learned = parse_website_reaction(json.dumps(BILIBILI_REACTION), candidates, links, activity)
         self.assertEqual(discovery.url, BILIBILI_URL)
         self.assertEqual(discovery.evidence_kind, "metadata")
         self.assertEqual(discovery.observation, "这是观鸟记录。")
+        self.assertEqual(learned.domain, LINKED_SITE)
+        self.assertEqual(learned.source_url, BILIBILI_URL)
+        self.assertEqual(learned.link_url, LINKED_PAGE)
+        _, no_link = parse_website_reaction(json.dumps(BILIBILI_REACTION), candidates, [], activity)
+        self.assertIsNone(no_link)
+        other = dict(candidates[0], url="https://www.bilibili.com/video/BV2TestFish/")
+        other_choice = {"choices": [{"message": {"content": '{"choice":2,"site_choice":1,"reaction":"鲸鲸"}'}}]}
+        discovery, wrong_page = parse_website_reaction(json.dumps(other_choice), candidates + [other], links, activity)
+        self.assertEqual(discovery.url, other["url"])
+        self.assertIsNone(wrong_page)
         fake_choice = {"choices": [{"message": {"content": '{"choice":99,"reaction":"鲸鲸"}'}}]}
         with self.assertRaisesRegex(ValueError, "没有选中"):
-            parse_bilibili_reaction(json.dumps(fake_choice), candidates)
+            parse_website_reaction(json.dumps(fake_choice), candidates, links, activity)
 
 
 class WorkSignals(QObject):
@@ -160,6 +183,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             "/video": VIDEO_RESULT,
             "/deepseek-search": BILIBILI_SEARCH_RESULT,
             "/deepseek-empty": {"results": BILIBILI_SEARCH_RESULT["results"][:2]},
+            "/deepseek-bilibili-page": BILIBILI_PAGE,
+            "/deepseek-linked-page": LINKED_DOCUMENT,
             "/deepseek-chat": BILIBILI_REACTION,
         }.get(self.path, WEB_RESULT)
         body = json.dumps(result, ensure_ascii=False).encode()
@@ -295,7 +320,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertEqual(edit.key.text(), "")
         self.assertIn("钥匙串", edit.key.placeholderText())
 
-    def test_deepseek_key_only_connection_searches_then_selects_a_bilibili_video(self):
+    def test_deepseek_rotates_presets_and_revisits_a_learned_website_after_restart(self):
         secret = "deepseek-test-key"
         self.credentials.get.return_value = secret
         self.controller.open_panel()
@@ -303,6 +328,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         dialog = AgentConnectionDialog(self.controller, None, settings)
         dialog.provider.setCurrentIndex(dialog.provider.findData("deepseek"))
         dialog.key.setText(secret)
+        dialog.background.setChecked(True)
         self.assertEqual(dialog.endpoint.text(), DEEPSEEK_SEARCH_ENDPOINT)
         self.assertEqual(dialog.model.text(), DEEPSEEK_MODEL)
         self.assertEqual(dialog.capability.currentData(), "video")
@@ -311,12 +337,21 @@ class ExplorationIntegrationTests(unittest.TestCase):
         connection, = self.controller.diary.connections()
         self.assertEqual(connection.provider, "deepseek")
         self.credentials.set.assert_called_once_with(connection.id, secret)
+        self.assertEqual(self.controller.save_settings(ExplorationSettings(True, 4)), "")
+
+        websites = WebsiteSettingsPanel(self.controller, self.controller.panel)
+        websites.address.setText("https://www.example.net/videos")
+        websites._add()
+        self.assertEqual([site.domain for site in self.controller.diary.websites()], [BILIBILI_DOMAIN, "example.net"])
+        websites.close()
 
         send = self.controller.network.post
         fixture_paths = {
             DEEPSEEK_SEARCH_ENDPOINT: "/deepseek-search",
+            DEEPSEEK_FETCH_ENDPOINT: "/deepseek-bilibili-page",
             DEEPSEEK_CHAT_ENDPOINT: "/deepseek-chat",
         }
+        full_round = [DEEPSEEK_SEARCH_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT]
         endpoints = []
 
         def fixture_post(request, body):
@@ -328,27 +363,49 @@ class ExplorationIntegrationTests(unittest.TestCase):
         with patch.object(self.controller.network, "post", side_effect=fixture_post):
             self.controller.panel.explore.click()
             self.finish_round()
-            self.assertEqual(endpoints, [DEEPSEEK_SEARCH_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT])
+            self.assertEqual(endpoints, full_round)
             self.assertEqual(self.controller.panel.history.count(), 1)
             entry, = self.controller.diary.recent()
             self.assertEqual(entry["url"], BILIBILI_URL)
             self.assertEqual(entry["reaction"], "鲸鲸，想看看是哪种小鸟。")
-            self.assertEqual(len(self.server.received), 2)
+            self.assertEqual(len(self.server.received), 3)
             self.assertTrue(all(record[2] == f"Bearer {secret}" for record in self.server.received))
             search_body = self.server.received[0][1]
-            chat_body = self.server.received[1][1]
-            self.assertTrue(search_body["query"].endswith("site:www.bilibili.com"))
+            self.assertEqual(self.server.received[1][1]["url"], BILIBILI_URL)
+            chat_body = self.server.received[2][1]
+            self.assertTrue(search_body["query"].endswith("site:bilibili.com"))
             self.assertEqual(chat_body["model"], DEEPSEEK_MODEL)
             self.assertNotIn(secret, json.dumps(chat_body))
-            self.assertIn("今日探索 1/3 轮", self.controller.panel.status.text())
+            self.assertIn("今日探索 1/4 轮", self.controller.panel.status.text())
+            self.assertIn(f"记住了 {LINKED_SITE}", self.controller.status)
+            remembered = self.controller.diary.websites()[-1]
+            self.assertEqual((remembered.kind, remembered.source_url, remembered.link_url),
+                             ("learned", BILIBILI_URL, LINKED_PAGE))
 
-            fixture_paths[DEEPSEEK_SEARCH_ENDPOINT] = "/deepseek-empty"
-            self.controller.panel.explore.click()
+        self.close_pet(self.controller, self.window)
+        self.make_pet()
+        send = self.controller.network.post
+        fixture_paths[DEEPSEEK_SEARCH_ENDPOINT] = "/deepseek-empty"
+        fixture_paths[DEEPSEEK_FETCH_ENDPOINT] = "/deepseek-linked-page"
+        with patch.object(self.controller.network, "post", side_effect=fixture_post):
+            self.controller.last_touch -= IDLE_BEFORE_EXPLORING + 1
+            self.controller._tick()
             self.finish_round()
-            self.assertEqual(endpoints[2:], [DEEPSEEK_SEARCH_ENDPOINT])
-            self.assertIn("没搜到符合条件的 B 站公开视频", self.controller.status)
-            self.assertEqual(self.controller.panel.history.count(), 1)
-            self.assertIsNone(self.controller.video_candidates)
+            self.assertEqual(endpoints[3:], full_round)
+            self.assertTrue(self.server.received[3][1]["query"].endswith(f"site:{LINKED_SITE}"))
+            self.assertEqual(self.server.received[4][1]["url"], LINKED_PAGE)
+            self.assertEqual(self.controller.diary.recent()[0]["url"], LINKED_PAGE)
+            self.assertEqual(self.controller.diary.recent()[0]["evidence_kind"], "article")
+
+            self.controller.remove_website(LINKED_SITE)
+            self.assertNotIn(LINKED_SITE, {site.domain for site in self.controller.diary.websites()})
+            self.assertIn(LINKED_SITE, self.controller.diary.known_website_domains())
+            self.controller.start_exploring()
+            self.finish_round()
+            self.assertEqual(endpoints[6:], [DEEPSEEK_SEARCH_ENDPOINT])
+            self.assertTrue(self.server.received[6][1]["query"].endswith("site:example.net"))
+            self.assertIn("没在 example.net 找到合适的公开内容", self.controller.status)
+            self.assertIsNone(self.controller.outing)
 
     def test_custom_agent_redirect_is_not_followed(self):
         connection = self.connection("redirect", "web")

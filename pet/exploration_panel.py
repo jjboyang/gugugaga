@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import sqlite3
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, QUrl
@@ -48,6 +49,9 @@ class ExplorationPanel(QDialog):
         self.source.clicked.connect(self._open_source)
         actions.addWidget(self.source)
         actions.addStretch()
+        self.websites_button = QPushButton("探索网站", self)
+        self.websites_button.clicked.connect(controller.open_websites)
+        actions.addWidget(self.websites_button)
         self.settings_button = QPushButton("Agent 连接", self)
         self.settings_button.clicked.connect(controller.open_settings)
         actions.addWidget(self.settings_button)
@@ -72,6 +76,7 @@ class ExplorationPanel(QDialog):
             self.history.blockSignals(False)
         self._show_entry(self.history.currentRow())
         self.status.setText(status)
+        self.websites_button.setEnabled(available)
         self.settings_button.setEnabled(available)
         self.explore.setEnabled(can_start)
 
@@ -92,6 +97,95 @@ class ExplorationPanel(QDialog):
         index = self.history.currentRow()
         if 0 <= index < len(self.entries):
             url = self.entries[index]["url"]
+            if public_url(url):
+                QDesktopServices.openUrl(QUrl(url))
+
+
+class WebsiteSettingsPanel(QDialog):
+    def __init__(self, controller, parent):
+        super().__init__(parent)
+        self.controller = controller
+        self.setWindowTitle("探索网站")
+        self.resize(450, 360)
+
+        layout = QVBoxLayout(self)
+        intro = plain_label(self)
+        intro.setText("添加几家想让大肥鱼去逛的网站。她自己发现并收藏的网站也会出现在这里。")
+        layout.addWidget(intro)
+        add_row = QHBoxLayout()
+        self.address = QLineEdit(self)
+        self.address.setPlaceholderText("域名或网址")
+        self.address.setAccessibleName("网站域名或网址")
+        self.address.returnPressed.connect(self._add)
+        add_row.addWidget(self.address)
+        add_button = QPushButton("添加网站", self)
+        add_button.clicked.connect(self._add)
+        add_row.addWidget(add_button)
+        layout.addLayout(add_row)
+
+        self.sites = QListWidget(self)
+        self.sites.setAccessibleName("探索网站列表")
+        self.sites.currentItemChanged.connect(self._selection_changed)
+        layout.addWidget(self.sites)
+        self.info = plain_label(self)
+        layout.addWidget(self.info)
+
+        actions = QHBoxLayout()
+        self.source = QPushButton("打开发现来源", self)
+        self.source.clicked.connect(self._open_source)
+        actions.addWidget(self.source)
+        self.remove = QPushButton("移除", self)
+        self.remove.clicked.connect(self._remove)
+        actions.addWidget(self.remove)
+        actions.addStretch()
+        close_button = QPushButton("关闭", self)
+        close_button.clicked.connect(self.accept)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.refresh()
+
+    def refresh(self):
+        self.sites.clear()
+        for site in self.controller.diary.websites():
+            kind = "你预设的" if site.kind == "preset" else "她自己发现的"
+            item = QListWidgetItem(f"{site.domain} · {kind}")
+            item.setData(Qt.UserRole, site)
+            self.sites.addItem(item)
+        self.sites.setCurrentRow(0)
+        self._selection_changed()
+
+    def _selection_changed(self):
+        item = self.sites.currentItem()
+        site = item.data(Qt.UserRole) if item else None
+        self.remove.setEnabled(site is not None)
+        self.source.setEnabled(bool(site and public_url(site.source_url)))
+        self.info.setText(f"她还想找「{site.topic}」。" if site and site.topic else "")
+
+    def _add(self):
+        try:
+            self.controller.diary.add_website(self.address.text())
+            self.refresh()
+        except ValueError as error:
+            self.info.setText(str(error))
+            return
+        except sqlite3.Error:
+            self.info.setText("网站列表暂时读写不了。")
+            return
+        self.address.clear()
+
+    def _remove(self):
+        item = self.sites.currentItem()
+        if item:
+            try:
+                self.controller.remove_website(item.data(Qt.UserRole).domain)
+                self.refresh()
+            except sqlite3.Error:
+                self.info.setText("网站列表暂时读写不了。")
+
+    def _open_source(self):
+        item = self.sites.currentItem()
+        if item:
+            url = item.data(Qt.UserRole).source_url
             if public_url(url):
                 QDesktopServices.openUrl(QUrl(url))
 
@@ -151,6 +245,8 @@ class AgentSettingsPanel(QDialog):
         self.agents.clear()
         for connection in self.controller.diary.connections():
             capability = "网页" if connection.capability == "web" else "视频"
+            if connection.provider == "deepseek":
+                capability = "网站探索"
             visibility = ("可后台调用" if connection.background else "手动探索") if connection.enabled else "已暂停"
             item = QListWidgetItem(f"{connection.name} · {capability} · {visibility}")
             item.setData(Qt.UserRole, connection)
@@ -201,7 +297,7 @@ class AgentConnectionDialog(QDialog):
         form = QFormLayout()
         self.provider = QComboBox(self)
         self.provider.addItem("OpenAI Responses · 网页搜索", "openai")
-        self.provider.addItem("DeepSeek · B 站", "deepseek")
+        self.provider.addItem("DeepSeek · 网站探索", "deepseek")
         self.provider.addItem("Dify Agent", "dify")
         self.provider.addItem("自定义 Agent · HTTP JSON", "http")
         self.name = QLineEdit(existing.name if existing else "网页探索", self)
@@ -254,6 +350,7 @@ class AgentConnectionDialog(QDialog):
         openai = provider == "openai"
         deepseek = provider == "deepseek"
         dify = provider == "dify"
+        self.capability.setItemText(1, "探索网站" if deepseek else "找视频")
         fixed_endpoints = {OPENAI_ENDPOINT, DEEPSEEK_SEARCH_ENDPOINT}
         if openai:
             self.endpoint.setText(OPENAI_ENDPOINT)
@@ -263,7 +360,7 @@ class AgentConnectionDialog(QDialog):
             self.model.setText(DEEPSEEK_MODEL)
             self.capability.setCurrentIndex(1)
             if self.name.text() == "网页探索":
-                self.name.setText("B 站视频")
+                self.name.setText("网站探索")
         elif dify:
             if not self.endpoint.text() or self.endpoint.text() in fixed_endpoints:
                 self.endpoint.setText(DIFY_ENDPOINT)

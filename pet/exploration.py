@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from ipaddress import ip_address
 from pathlib import Path
+import re
 import sqlite3
 from urllib.parse import urlsplit
 
@@ -14,6 +15,8 @@ OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
 DIFY_ENDPOINT = "https://api.dify.ai/v1/chat-messages"
 DEEPSEEK_SEARCH_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
 DEEPSEEK_MODEL = "deepseek-flash"
+BILIBILI_DOMAIN = "bilibili.com"
+DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 TOPICS = (
     "海鸥在海边是怎么找吃的", "水獭在水里做什么", "雨天的老街长什么样",
     "鸟是怎么选地方筑窝的", "窗边的光怎样影响照片", "潮水退下去能看到什么",
@@ -46,6 +49,53 @@ def public_url(value):
         return "." in host and not host.endswith((".localhost", ".local", ".internal"))
 
 
+def website_domain(value):
+    """Normalize a website address, retaining distinct non-www subdomains."""
+    if not isinstance(value, str):
+        return None
+    address = value.strip()
+    if "://" not in address:
+        address = "https://" + address
+    parts = read_url(address)
+    if not parts or parts.scheme not in {"http", "https"} or parts.port not in (None, 80, 443):
+        return None
+    try:
+        host = parts.hostname.rstrip(".").encode("idna").decode("ascii").removeprefix("www.")
+    except UnicodeError:
+        return None
+    labels = host.split(".")
+    if (len(labels) < 2 or len(host) > 120 or not labels[-1][0:1].isalpha()
+            or labels[-1] in {"localhost", "local", "internal", "lan", "onion", "test", "invalid"}
+            or not all(DOMAIN_LABEL.fullmatch(label) for label in labels)):
+        return None
+    return host
+
+
+def within_website(host, domain):
+    return host == domain or host.endswith("." + domain)
+
+
+@dataclass(frozen=True)
+class ExplorationWebsite:
+    domain: str
+    kind: str = "preset"
+    link_url: str = ""
+    source_url: str = ""
+    topic: str = ""
+    last_visited: float = 0.0
+
+
+def choose_website(sites, now):
+    if not sites:
+        return None
+    presets = [site for site in sites if site.kind == "preset"]
+    learned = [site for site in sites if site.kind == "learned"]
+    due = [site for site in learned if site.last_visited <= now - 24 * 3600]
+    if due and (not presets or max(sites, key=lambda site: site.last_visited).kind == "preset"):
+        return min(due, key=lambda site: site.last_visited)
+    return min(presets or learned, key=lambda site: site.last_visited)
+
+
 @dataclass(frozen=True)
 class AgentConnection:
     id: str
@@ -68,7 +118,7 @@ class AgentConnection:
                 raise ValueError("OpenAI 网页探索需要 API Key。")
         elif self.provider == "deepseek":
             if (self.endpoint, self.capability, self.model) != (DEEPSEEK_SEARCH_ENDPOINT, "video", DEEPSEEK_MODEL):
-                raise ValueError("DeepSeek B 站探索使用内置的视频搜索配置。")
+                raise ValueError("DeepSeek 网站探索使用内置的搜索配置。")
             if not self.has_key:
                 raise ValueError("请填写 DeepSeek API Key。")
         elif self.provider in {"dify", "http"}:
@@ -157,6 +207,12 @@ class ExplorationDiary:
                     observation TEXT, reaction TEXT, next_topic TEXT, shared INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS outings_by_day ON outings(local_day);
+                CREATE TABLE IF NOT EXISTS exploration_websites (
+                    domain TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                    link_url TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '', last_visited REAL NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO exploration_websites (domain, kind) VALUES ('bilibili.com', 'preset');
                 CREATE TABLE IF NOT EXISTS work_returns (local_day TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS work_shares (local_day TEXT PRIMARY KEY);
             """)
@@ -196,16 +252,42 @@ class ExplorationDiary:
         with self.db:
             self.db.execute("DELETE FROM agents WHERE id = ?", (connection_id,))
 
-    def reserve(self, agent, activity, now, day, allowance):
+    def websites(self):
+        return [ExplorationWebsite(**dict(row)) for row in self.db.execute(
+            "SELECT * FROM exploration_websites WHERE kind != 'removed' ORDER BY rowid"
+        )]
+
+    def known_website_domains(self):
+        return [row[0] for row in self.db.execute("SELECT domain FROM exploration_websites")]
+
+    def add_website(self, address):
+        domain = website_domain(address)
+        if not domain:
+            raise ValueError("请输入公开网站的网址或域名。")
+        with self.db:
+            self.db.execute("""
+                INSERT INTO exploration_websites (domain, kind) VALUES (?, 'preset')
+                ON CONFLICT (domain) DO UPDATE SET kind = 'preset'
+                """, (domain,))
+
+    def remove_website(self, domain):
+        with self.db:
+            self.db.execute("UPDATE exploration_websites SET kind = 'removed' WHERE domain = ?", (domain,))
+
+    def reserve(self, agent, activity, now, day, allowance, *, website=None):
         """Count attempted outings and keep one in flight across pet instances."""
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if self.calls_on(day) >= allowance:
                 raise ValueError("今天的探索次数用完啦。")
             if self.db.execute(
-                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1", (now - 90,)
+                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1", (now - 120,)
             ).fetchone():
                 raise ValueError("已经在逛啦。")
+            if website and not self.db.execute("""
+                UPDATE exploration_websites SET last_visited = ? WHERE domain = ? AND kind != 'removed'
+                """, (now, website.domain)).rowcount:
+                raise ValueError("这个网站已移除，选一个别的网站再去逛吧。")
             return self.db.execute("""
                 INSERT INTO outings (local_day, started, agent_name, topic, capability, interest, state)
                 VALUES (?, ?, ?, ?, ?, ?, 'pending')
@@ -214,7 +296,7 @@ class ExplorationDiary:
     def calls_on(self, day):
         return self.db.execute("SELECT count(*) FROM outings WHERE local_day = ?", (day,)).fetchone()[0]
 
-    def finish(self, outing_id, discovery=None):
+    def finish(self, outing_id, discovery=None, *, website=None):
         with self.db:
             if discovery is None:
                 self.db.execute("UPDATE outings SET state = 'error' WHERE id = ?", (outing_id,))
@@ -224,6 +306,13 @@ class ExplorationDiary:
                         observation = ?, reaction = ?, next_topic = ? WHERE id = ?
                     """, (discovery.title, discovery.url, discovery.evidence_kind, discovery.observation,
                           discovery.reaction, discovery.next_topic, outing_id))
+                if website:
+                    inserted = self.db.execute("""
+                        INSERT OR IGNORE INTO exploration_websites (domain, kind, link_url, source_url, topic)
+                        VALUES (?, 'learned', ?, ?, ?)
+                        """, (website.domain, website.link_url, website.source_url, website.topic))
+                    return inserted.rowcount == 1
+        return False
 
     def recent(self, limit=25):
         return self.db.execute(

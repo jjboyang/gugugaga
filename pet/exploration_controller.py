@@ -1,6 +1,7 @@
 """Schedule bounded background outings without blocking the pet window."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 import json
 import os
@@ -12,20 +13,37 @@ import time
 from PySide6.QtCore import QObject, QTimer, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from pet.exploration import ExplorationDiary, WORK_RETURN_DAYS, choose_activity
-from pet.exploration_agents import (
-    DEEPSEEK_CHAT_ENDPOINT, build_bilibili_reaction, build_request,
-    parse_bilibili_reaction, parse_bilibili_search, parse_result,
+from pet.exploration import (
+    BILIBILI_DOMAIN, Activity, AgentConnection, ExplorationDiary, ExplorationWebsite,
+    WORK_RETURN_DAYS, choose_activity, choose_website,
 )
-from pet.exploration_panel import AgentSettingsPanel, ExplorationPanel
+from pet.exploration_agents import (
+    DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, build_website_reaction,
+    parse_result, parse_website_reaction, parse_website_search, read_website_page, website_links,
+)
+from pet.exploration_panel import AgentSettingsPanel, ExplorationPanel, WebsiteSettingsPanel
 
 
 IDLE_BEFORE_EXPLORING = 10 * 60
 OUTING_INTERVAL = 15 * 60
 REQUEST_TIMEOUT_MS = 40_000
+FETCH_TIMEOUT_MS = 8_000
 MAX_RESPONSE_BYTES = 512 * 1024
 DIARY_ERROR = "探索日记暂时读写不了。"
 KEY_ERROR = "系统钥匙串不可用。请解锁钥匙串后再试。"
+
+
+@dataclass
+class Outing:
+    id: int
+    agent: AgentConnection
+    automatic: bool
+    activity: Activity
+    website: ExplorationWebsite | None = None
+    stage: str = "agent"
+    page_url: str = ""
+    results: list = field(default_factory=list)
+    links: list = field(default_factory=list)
 
 
 class SystemCredentials:
@@ -69,7 +87,6 @@ class ExplorationController(QObject):
         self.settings_panel = None
         self.reply = None
         self.outing = None
-        self.video_candidates = None
         self.buffer = bytearray()
         self.request_key = ""
         self.request_error = ""
@@ -91,7 +108,7 @@ class ExplorationController(QObject):
         self.network = QNetworkAccessManager(self)
         self.deadline = QTimer(self)
         self.deadline.setSingleShot(True)
-        self.deadline.timeout.connect(lambda: self._cancel("这次逛得有点久，下次再去。"))
+        self.deadline.timeout.connect(lambda: self._abort_request("这次逛得有点久，下次再去。"))
         window.exploration_requested.connect(self.open_panel)
         window.interaction_started.connect(self._touched)
         window.pet_tapped.connect(self._on_pet_tapped)
@@ -126,6 +143,20 @@ class ExplorationController(QObject):
             self.settings_panel = None
             self._refresh()
 
+    def open_websites(self):
+        if self.diary is None:
+            return
+        try:
+            WebsiteSettingsPanel(self, self.panel).exec()
+        except sqlite3.Error:
+            self.status = DIARY_ERROR
+        self._refresh()
+
+    def remove_website(self, domain):
+        self.diary.remove_website(domain)
+        if self.outing and self.outing.website and self.outing.website.domain == domain:
+            self._cancel("已移除这个探索网站。")
+
     def save_settings(self, settings):
         try:
             self.diary.save_settings(settings)
@@ -133,7 +164,7 @@ class ExplorationController(QObject):
             return str(error)
         except sqlite3.Error:
             return DIARY_ERROR
-        if not settings.automatic and self.outing and self.outing[2]:
+        if not settings.automatic and self.outing and self.outing.automatic:
             self._cancel("已暂停自动探索。")
         self.status = ""
         self._refresh()
@@ -148,14 +179,14 @@ class ExplorationController(QObject):
             return str(error)
         error = self._update_connection(connection.id, old, secret,
                                         lambda: self.diary.save_connection(connection))
-        if not error and self.outing and self.outing[1].id == connection.id:
+        if not error and self.outing and self.outing.agent.id == connection.id:
             self._cancel("连接设置已更新。")
         return error
 
     def remove_connection(self, connection):
         error = self._update_connection(connection.id, connection, "" if connection.has_key else None,
                                         lambda: self.diary.remove_connection(connection.id))
-        if not error and self.outing and self.outing[1].id == connection.id:
+        if not error and self.outing and self.outing.agent.id == connection.id:
             self._cancel("已移除此连接。")
         return error
 
@@ -204,12 +235,19 @@ class ExplorationController(QObject):
             agent = self.rng.choice(matching)
             agent.validate()
             self.next_outing = time.monotonic() + OUTING_INTERVAL
+            website = None
+            if agent.provider == "deepseek":
+                website = choose_website(self.diary.websites(), now.timestamp())
+                if website is None:
+                    raise ValueError("先在「探索网站」里加一个网站，我再去逛。")
+                if website.kind == "learned" and website.topic:
+                    activity = replace(activity, topic=website.topic)
             key = self._read_key(agent)
             if key is None:
                 self._refresh()
                 return
             outing_id = self.diary.reserve(agent, activity, now.timestamp(), now.date().isoformat(),
-                                          settings.daily_limit)
+                                          settings.daily_limit, website=website)
         except ValueError as error:
             self.status = str(error)
             self._refresh()
@@ -219,18 +257,21 @@ class ExplorationController(QObject):
             self._refresh()
             return
 
-        self.outing = (outing_id, agent, automatic, activity)
+        self.outing = Outing(outing_id, agent, automatic, activity, website)
         self.request_key = key
-        self._post(agent, agent.endpoint, build_request(agent, activity))
-        self.deadline.start(REQUEST_TIMEOUT_MS)
-        self.status = f"我正在找「{activity.topic}」。"
+        self._post(agent.endpoint, build_request(agent, activity, website=website),
+                   stage="search" if website else "agent")
+        where = f"在 {website.domain} " if website else "在"
+        self.status = f"我正{where}找「{activity.topic}」。"
         self.rig.set_exploring(True)
         self._refresh()
 
-    def _post(self, agent, endpoint, body):
+    def _post(self, endpoint, body, *, stage):
+        self.outing.stage = stage
         request = QNetworkRequest(QUrl(endpoint))
         request.setRawHeader(b"Content-Type", b"application/json")
-        request.setRawHeader(b"Accept", b"text/event-stream" if agent.provider == "dify" else b"application/json")
+        accept = b"text/event-stream" if self.outing.agent.provider == "dify" else b"application/json"
+        request.setRawHeader(b"Accept", accept)
         if self.request_key:
             request.setRawHeader(b"Authorization", f"Bearer {self.request_key}".encode("ascii"))
         request.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.ManualRedirectPolicy)
@@ -241,6 +282,7 @@ class ExplorationController(QObject):
         self.reply.setReadBufferSize(MAX_RESPONSE_BYTES + 1)
         self.reply.readyRead.connect(self._read)
         self.reply.finished.connect(self._finished)
+        self.deadline.start(FETCH_TIMEOUT_MS if stage == "fetch" else REQUEST_TIMEOUT_MS)
 
     def _read_key(self, agent):
         if not agent.has_key:
@@ -260,7 +302,10 @@ class ExplorationController(QObject):
             return
         self.buffer.extend(bytes(self.reply.readAll()))
         if len(self.buffer) > MAX_RESPONSE_BYTES:
-            self._cancel("这次返回的内容太长了。")
+            self._abort_request("这次返回的内容太长了。")
+
+    def _abort_request(self, reason):
+        self._cancel("" if self.outing and self.outing.stage == "fetch" else reason)
 
     def _cancel(self, reason):
         if self.reply is not None:
@@ -271,10 +316,13 @@ class ExplorationController(QObject):
         if self.reply is None:
             return
         reply, self.reply = self.reply, None
-        outing_id, agent, _, activity = self.outing
+        outing = self.outing
+        agent = outing.agent
+        self.deadline.stop()
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         problem = self.request_error
         discovery = None
+        learned = None
         if not problem:
             self.buffer.extend(bytes(reply.readAll()))
             if len(self.buffer) > MAX_RESPONSE_BYTES:
@@ -289,40 +337,75 @@ class ExplorationController(QObject):
                 problem = f"这次没连上「{agent.name}」。"
         reply.deleteLater()
 
-        if not problem:
-            try:
-                if agent.provider == "deepseek":
-                    if self.video_candidates is None:
-                        self.video_candidates = parse_bilibili_search(self.buffer)
-                        body = build_bilibili_reaction(agent, activity, self.video_candidates)
-                        self._post(agent, DEEPSEEK_CHAT_ENDPOINT, body)
-                        self.status = "我在挑一条 B 站视频。"
-                        self._refresh()
-                        return
-                    discovery = parse_bilibili_reaction(self.buffer, self.video_candidates)
+        try:
+            if outing.website and self._continue_website(outing, problem):
+                return
+            if not problem:
+                if outing.website:
+                    discovery, learned = parse_website_reaction(
+                        self.buffer, outing.results, outing.links, outing.activity,
+                    )
                 else:
                     discovery = parse_result(agent, self.buffer)
                 key = self.request_key
                 if key and any(key == value or (len(key) >= 12 and key in value)
-                               for value in vars(discovery).values()):
-                    discovery = None
+                               for record in (discovery, learned) if record
+                               for value in vars(record).values() if isinstance(value, str)):
+                    discovery = learned = None
                     problem = "这个 Agent 把凭据写进了回复。"
-            except (ValueError, RecursionError) as error:
-                problem = str(error)
+        except (ValueError, RecursionError) as error:
+            problem = str(error)
+        except sqlite3.Error:
+            problem = DIARY_ERROR
 
         self.outing = None
-        self.video_candidates = None
         self.request_key = ""
-        self.deadline.stop()
         self.rig.set_exploring(False)
         self.buffer.clear()
         try:
-            self.diary.finish(outing_id, discovery)
-            self.status = problem or "我找到了一条。想看的话，点一下最新的记录。"
+            remembered = self.diary.finish(outing.id, discovery, website=learned)
+            if remembered:
+                self.status = f"我记住了 {learned.domain}，改天还想去看看。"
+            else:
+                self.status = problem or "我找到了一条。想看的话，点一下最新的记录。"
         except sqlite3.Error:
             self.status = DIARY_ERROR
         if not self.closing:
             self._refresh()
+
+    def _continue_website(self, outing, problem):
+        if outing.stage == "search" and not problem:
+            outing.results = parse_website_search(self.buffer, outing.website)
+            outing.page_url = outing.results[0]["url"] if outing.results else outing.website.link_url
+            if not outing.page_url:
+                raise ValueError(f"这次没在 {outing.website.domain} 找到合适的公开内容。")
+            self._post(DEEPSEEK_FETCH_ENDPOINT, {"url": outing.page_url}, stage="fetch")
+            return True
+        if outing.stage != "fetch" or self.request_error:
+            return False
+
+        title, page = "", ""
+        if not problem:
+            try:
+                title, page = read_website_page(self.buffer)
+            except ValueError:
+                pass
+        if not outing.results:
+            if not page:
+                raise ValueError(f"这次没能打开 {outing.website.domain} 的公开页面。")
+            outing.results = [{
+                "url": outing.page_url, "title": title or outing.website.domain,
+                "observation": " ".join(page.split())[:350],
+                "evidence_kind": "metadata" if outing.website.domain == BILIBILI_DOMAIN else "article",
+            }]
+        known_domains = self.diary.known_website_domains()
+        text = "\n".join((outing.results[0]["observation"], page))
+        outing.links = website_links(text, known_domains)
+        body = build_website_reaction(outing.agent, outing.activity, outing.results, outing.links)
+        self._post(DEEPSEEK_CHAT_ENDPOINT, body, stage="reaction")
+        self.status = f"我在挑 {outing.website.domain} 上感兴趣的内容。"
+        self._refresh()
+        return True
 
     def _refresh(self):
         if self.panel is None:
