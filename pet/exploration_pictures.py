@@ -28,6 +28,7 @@ class PictureCandidate:
     kind: str
     description: str
     jpeg: bytes
+    timestamp_ms: int | None = None
 
 
 class PageImages(HTMLParser):

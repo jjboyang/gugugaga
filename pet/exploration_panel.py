@@ -19,6 +19,7 @@ from pet.exploration import (
 from pet.exploration_ui import (
     ConnectorPicker, Toggle, add_card, button, card_list, character, header, label, surface, themed_layout,
 )
+from pet.exploration_video import playback_url, timestamp_text, video_page
 
 
 def stamp(entry):
@@ -118,11 +119,15 @@ class DiscoveryNote(QScrollArea):
         picture_layout.setContentsMargins(11, 8, 11, 10)
         picture_layout.setSpacing(6)
         self.picture_heading = label(role="section")
+        self.frame_source = button("播放这一刻")
+        self.frame_source.clicked.connect(self._play_frame)
+        self.frame_url = ""
         enlarge = button("查看大图")
         enlarge.clicked.connect(self._view_picture)
         controls = QHBoxLayout()
         controls.addWidget(self.picture_heading)
         controls.addStretch()
+        controls.addWidget(self.frame_source)
         controls.addWidget(enlarge)
         picture_layout.addLayout(controls)
         self.picture_view = MemoryImage()
@@ -168,18 +173,34 @@ class DiscoveryNote(QScrollArea):
         image = QImage.fromData(picture.jpeg, "JPEG") if picture else QImage()
         self.picture_view.set_image(image)
         self.picture_card.setVisible(not image.isNull())
+        picture_ms = entry["picture_ms"]
+        self.frame_url = playback_url(entry["url"], picture_ms) if picture_ms is not None else ""
+        self.frame_source.setVisible(bool(self.frame_url))
         if picture:
             origin = "来源页封面" if picture.kind == "cover" else "原页配图"
+            if picture_ms is not None:
+                origin = f"视频画面 {timestamp_text(picture_ms)}"
             self.picture_heading.setText(f"我留下的图  ·  {origin}")
             self.picture_reason.setText(picture.reason)
             self.picture_reason.setVisible(bool(picture.reason))
-        evidence = {"article": "网页正文", "metadata": "标题或简介", "transcript": "字幕或转写"}
-        self.observation_heading.setText(f'我看到的  ·  {evidence.get(entry["evidence_kind"], "来源内容")}')
+        evidence = {"article": "网页正文", "metadata": "标题或简介", "transcript": "字幕或转写",
+                    "subtitle": "视频字幕", "audio_transcript": "音频转写", "video_frame": "视频画面"}
+        source = evidence.get(entry["evidence_kind"], "来源内容")
+        start_ms, end_ms = entry["video_start_ms"], entry["video_end_ms"]
+        if start_ms is not None:
+            source += f" {timestamp_text(start_ms)}"
+            if end_ms is not None and end_ms // 1000 > start_ms // 1000:
+                source += f"–{timestamp_text(end_ms)}"
+        self.observation_heading.setText(f"我看到的  ·  {source}")
         self.observation.setText(entry["observation"])
         next_topic = entry["next_topic"] or ""
         self.next_topic.setText(next_topic)
         self.followup.setVisible(bool(next_topic))
         self.verticalScrollBar().setValue(0)
+
+    def _play_frame(self):
+        if public_url(self.frame_url):
+            QDesktopServices.openUrl(QUrl(self.frame_url))
 
     def _view_picture(self):
         if self.picture_view.image.isNull():
@@ -256,6 +277,7 @@ class ExplorationPanel(QDialog):
         sheet_layout.addWidget(self.pages, 1)
 
         self.source = button("打开来源")
+        self.source_url = ""
         self.source.clicked.connect(self._open_source)
         sheet_layout.addWidget(self.source, 0, Qt.AlignRight)
         content.addWidget(sheet, 1)
@@ -320,7 +342,15 @@ class ExplorationPanel(QDialog):
         entry = self.entries[index] if 0 <= index < len(self.entries) else None
         self.pages.setCurrentIndex(0 if entry else 1)
         self.source.setVisible(entry is not None)
-        self.source.setEnabled(bool(entry and public_url(entry["url"])))
+        self.source_url = entry["url"] if entry else ""
+        self.source.setText("打开来源")
+        if entry and video_page(self.source_url):
+            start_ms = entry["video_start_ms"]
+            if start_ms is None:
+                start_ms = entry["picture_ms"]
+            self.source_url = playback_url(self.source_url, start_ms)
+            self.source.setText("播放原视频" if start_ms is None else f"从 {timestamp_text(start_ms)} 播放")
+        self.source.setEnabled(public_url(self.source_url))
         if entry is None:
             self.entry_id = None
         elif self.entry_id != entry["id"]:
@@ -334,11 +364,8 @@ class ExplorationPanel(QDialog):
             self.detail.show_entry(entry, picture)
 
     def _open_source(self):
-        index = self.history.currentRow()
-        if 0 <= index < len(self.entries):
-            url = self.entries[index]["url"]
-            if public_url(url):
-                QDesktopServices.openUrl(QUrl(url))
+        if public_url(self.source_url):
+            QDesktopServices.openUrl(QUrl(self.source_url))
 
 
 class WebsiteSettingsPanel(QDialog):

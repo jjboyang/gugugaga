@@ -22,6 +22,7 @@ TOPICS = (
     "鸟是怎么选地方筑窝的", "窗边的光怎样影响照片", "潮水退下去能看到什么",
 )
 WORK_RETURN_DAYS = 3
+PENDING_OUTING_SECONDS = 260
 
 
 def read_url(value):
@@ -142,6 +143,13 @@ class ExplorationPicture:
 
 
 @dataclass(frozen=True)
+class VideoMoment:
+    start_ms: int | None = None
+    end_ms: int | None = None
+    picture_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class Discovery:
     title: str
     url: str
@@ -150,6 +158,7 @@ class Discovery:
     reaction: str
     next_topic: str = ""
     picture: ExplorationPicture | None = None
+    video: VideoMoment | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +228,10 @@ class ExplorationDiary:
                 CREATE TABLE IF NOT EXISTS exploration_pictures (
                     outing_id INTEGER PRIMARY KEY REFERENCES outings (id) ON DELETE CASCADE,
                     url TEXT NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, jpeg BLOB NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS exploration_video_moments (
+                    outing_id INTEGER PRIMARY KEY REFERENCES outings (id) ON DELETE CASCADE,
+                    start_ms INTEGER, end_ms INTEGER, picture_ms INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS exploration_websites (
                     domain TEXT PRIMARY KEY, kind TEXT NOT NULL,
@@ -294,7 +307,8 @@ class ExplorationDiary:
             if self.calls_on(day) >= allowance:
                 raise ValueError("今天的探索次数用完啦。")
             if self.db.execute(
-                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1", (now - 150,)
+                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1",
+                (now - PENDING_OUTING_SECONDS,),
             ).fetchone():
                 raise ValueError("已经在逛啦。")
             if website and not self.db.execute("""
@@ -324,6 +338,11 @@ class ExplorationDiary:
                     self.db.execute("""
                         INSERT OR REPLACE INTO exploration_pictures VALUES (?, ?, ?, ?, ?)
                         """, (outing_id, picture.url, picture.kind, picture.reason, picture.jpeg))
+                if discovery.video:
+                    video = discovery.video
+                    self.db.execute("""
+                        INSERT OR REPLACE INTO exploration_video_moments VALUES (?, ?, ?, ?)
+                        """, (outing_id, video.start_ms, video.end_ms, video.picture_ms))
                 if website:
                     inserted = self.db.execute("""
                         INSERT OR IGNORE INTO exploration_websites (domain, kind, link_url, source_url, topic)
@@ -336,7 +355,9 @@ class ExplorationDiary:
         return self.db.execute(
             """SELECT outings.*, EXISTS (
                    SELECT 1 FROM exploration_pictures WHERE outing_id = outings.id
-               ) AS has_picture FROM outings WHERE state = 'done' ORDER BY id DESC LIMIT ?""", (limit,)
+               ) AS has_picture, video.start_ms AS video_start_ms, video.end_ms AS video_end_ms,
+                   video.picture_ms AS picture_ms FROM outings LEFT JOIN exploration_video_moments AS video
+                   ON video.outing_id = outings.id WHERE state = 'done' ORDER BY outings.id DESC LIMIT ?""", (limit,)
         ).fetchall()
 
     def picture(self, outing_id):

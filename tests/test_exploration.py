@@ -8,6 +8,8 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -26,12 +28,13 @@ from pet.exploration import (
     Discovery, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
 )
 from pet.exploration_agents import (
-    DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, parse_result,
+    DEEPSEEK_ASR_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, parse_result,
     parse_website_reaction, parse_website_search, website_links,
 )
 from pet.exploration_controller import ExplorationController, IDLE_BEFORE_EXPLORING
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
-from pet.exploration_pictures import collect_pictures
+from pet.exploration_pictures import PictureCandidate, collect_pictures
+from pet.exploration_video import AudioSample, TimedText, VideoMaterial, _audio, _frames, _parse_captions, playback_url, video_page
 from pet.window import PetWindow
 
 
@@ -74,9 +77,9 @@ BILIBILI_PAGE = {"title": "海边的小鸟", "content": (
 LINKED_DOCUMENT = {"title": "岸边观鸟笔记", "content": "这里整理了岸边常见的小鸟。"}
 
 
-def picture_bytes():
+def picture_bytes(format="PNG"):
     buffer = BytesIO()
-    Image.new("RGB", (320, 240), "#70a6dc").save(buffer, format="PNG")
+    Image.new("RGB", (320, 240), "#70a6dc").save(buffer, format=format)
     return buffer.getvalue()
 
 
@@ -102,6 +105,38 @@ class PictureCollectionTests(unittest.TestCase):
             pictures = collect_pictures(page, "https://example.org/articles/1", threading.Event())
         self.assertEqual([call.args[0] for call in get.call_args_list], ["https://example.org/bird.png", PICTURE_URL])
         self.assertEqual([p.url for p in pictures], [PICTURE_URL])
+
+
+class VideoCollectionTests(unittest.TestCase):
+    def test_caption_times_and_playback_keep_the_original_part(self):
+        source = video_page(BILIBILI_URL + "?p=3&spm_id_from=foo")
+        self.assertEqual(source, ("BiliBili", BILIBILI_URL + "?p=3"))
+        self.assertEqual(playback_url(source[1], 2520), BILIBILI_URL + "?p=3&t=2")
+        self.assertEqual(playback_url("https://youtu.be/M7lc1UVf-VE", 2520),
+                         "https://www.youtube.com/watch?v=M7lc1UVf-VE&t=2s")
+        srt = ("1\r\n00:00:01,100 --> 00:00:03,350\r\n<i>一只白鹭</i>停在栏杆上。\r\n\r\n"
+               "2\r\n00:01:00,000 --> 00:01:10,000\r\n远处的渔船。")
+        self.assertEqual(_parse_captions(srt, [(0, 18)]),
+                         [TimedText("subtitle", 1100, 3350, "一只白鹭停在栏杆上。")])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is unavailable")
+    def test_ffmpeg_decodes_real_video_and_audio_at_requested_times(self):
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            source = folder / "fixture.mp4"
+            subprocess.run([
+                shutil.which("ffmpeg"), "-nostdin", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=12",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+                "-t", "18", "-c:v", "mpeg4", "-c:a", "aac", "-threads", "1", str(source),
+            ], check=True, timeout=15)
+            cancelled, deadline = threading.Event(), time.monotonic() + 15
+            args = (shutil.which("ffmpeg"), source, BILIBILI_URL, 2, 14, folder, cancelled, deadline)
+            frames = _frames(*args, remote=False)
+            self.assertEqual([frame.timestamp_ms for frame in frames], [3000, 9000, 15000])
+            self.assertEqual(len({frame.jpeg for frame in frames}), 3)
+            audio = _audio(*args, remote=False)
+            self.assertEqual((audio.start_ms, audio.end_ms, audio.wav[:4]), (2000, 16000, b"RIFF"))
 
 
 def openai_connection():
@@ -208,7 +243,8 @@ class AgentHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        received = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        received = raw if self.path == "/deepseek-asr" else json.loads(raw)
         self.server.received.append((self.path, received, self.headers.get("Authorization")))
         if self.path == "/redirect":
             self.send_response(307)
@@ -226,6 +262,11 @@ class AgentHandler(BaseHTTPRequestHandler):
             "/deepseek-bilibili-page": BILIBILI_PAGE,
             "/deepseek-linked-page": LINKED_DOCUMENT,
             "/deepseek-chat": BILIBILI_REACTION,
+            "/deepseek-asr": {"text": "它顺着潮水退去的方向往前走。", "duration_ms": 2800},
+            "/deepseek-video-chat": {"choices": [{"message": {"content": json.dumps(
+                {"choice": 1, "reaction": "鲸鲸，原来退潮后它会跟着水走。", "video_choice": 2,
+                 "picture_choice": 1, "picture_reason": "我想记住它停在湿石头上的样子。"},
+            )}}]},
         }.get(self.path, WEB_RESULT)
         body = json.dumps(result, ensure_ascii=False).encode()
         self.send_response(200)
@@ -259,6 +300,9 @@ class ExplorationIntegrationTests(unittest.TestCase):
         fixture = patch("pet.exploration_pictures._download", return_value=b"")
         self.image_download = fixture.start()
         self.addCleanup(fixture.stop)
+        video_fixture = patch("pet.exploration_controller.collect_video", return_value=VideoMaterial())
+        self.video_read = video_fixture.start()
+        self.addCleanup(video_fixture.stop)
         self.make_pet()
 
     def make_pet(self):
@@ -540,6 +584,58 @@ class ExplorationIntegrationTests(unittest.TestCase):
         note, = self.controller.diary.recent()
         self.assertEqual(note["url"], BILIBILI_URL)
         self.assertFalse(note["has_picture"])
+
+    def test_video_evidence_and_frame_play_from_distinct_timestamps_after_restart(self):
+        secret = "deepseek-test-key"
+        self.credentials.get.return_value = secret
+        self.assertEqual(self.controller.save_connection(deepseek_connection(), None, secret), "")
+        self.video_read.return_value = VideoMaterial(
+            frames=[PictureCandidate(BILIBILI_URL, "frame", "", picture_bytes("JPEG"), 15300)],
+            captions=[TimedText("subtitle", 11200, 13000, "潮水退得很快。")],
+            audio=[AudioSample(11000, 13800, b"RIFFsample")],
+        )
+        fixture_paths = {
+            DEEPSEEK_SEARCH_ENDPOINT: "/deepseek-search",
+            DEEPSEEK_FETCH_ENDPOINT: "/deepseek-bilibili-page",
+            DEEPSEEK_ASR_ENDPOINT: "/deepseek-asr",
+            DEEPSEEK_CHAT_ENDPOINT: "/deepseek-video-chat",
+        }
+        send = self.controller.network.post
+
+        def fixture_post(request, body):
+            path = fixture_paths[request.url().toString()]
+            if path == "/deepseek-asr":
+                self.assertTrue(bytes(request.rawHeader("Content-Type")).startswith(b"multipart/form-data; boundary="))
+            request.setUrl(QUrl(f"http://127.0.0.1:{self.server.server_port}{path}"))
+            return send(request, body)
+
+        with patch.object(self.controller.network, "post", side_effect=fixture_post):
+            self.controller.start_exploring()
+            self.finish_round()
+        self.assertEqual([record[0] for record in self.server.received], list(fixture_paths.values()))
+        self.assertIn(b'name="file"; filename="speech.wav"', self.server.received[2][1])
+        self.assertIn(b"RIFFsample", self.server.received[2][1])
+        self.assertEqual(self.server.received[2][2], f"Bearer {secret}")
+        parts = self.server.received[3][1]["messages"][1]["content"]
+        evidence = json.loads(parts[0]["text"])["results"][0]["video_evidence"]
+        self.assertEqual([item["kind"] for item in evidence], ["subtitle", "audio_transcript", "video_frame"])
+        self.assertIn("画面依据 3 · 00:15", parts[1]["text"])
+        note, = self.controller.diary.recent()
+        self.assertEqual((note["evidence_kind"], note["observation"]),
+                         ("audio_transcript", "它顺着潮水退去的方向往前走。"))
+        self.assertEqual((note["video_start_ms"], note["video_end_ms"], note["picture_ms"]), (11000, 13800, 15300))
+
+        self.close_pet(self.controller, self.window)
+        self.make_pet()
+        self.controller.open_panel()
+        panel = self.controller.panel
+        self.assertEqual(panel.source.text(), "从 00:11 播放")
+        self.assertIn("视频画面 00:15", panel.detail.picture_heading.text())
+        with patch("pet.exploration_panel.QDesktopServices.openUrl") as open_url:
+            panel.source.click()
+            panel.detail.frame_source.click()
+        self.assertEqual([call.args[0].toString() for call in open_url.call_args_list],
+                         [BILIBILI_URL + "?t=11", BILIBILI_URL + "?t=15"])
 
     def test_custom_agent_redirect_is_not_followed(self):
         connection = self.connection("redirect", "web")
