@@ -5,8 +5,8 @@ from datetime import datetime
 import sqlite3
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QRect, Qt, QUrl
+from PySide6.QtGui import QDesktopServices, QImage, QPainter
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
     QLineEdit, QProgressBar, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
@@ -54,6 +54,28 @@ def dialog_actions(parent, primary, cancel):
     return actions
 
 
+class MemoryImage(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.image = QImage()
+        self.setAccessibleName("探索时留下的图片")
+
+    def set_image(self, image):
+        self.image = image
+        self.update()
+
+    def paintEvent(self, event):
+        if self.image.isNull():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        size = self.image.size().scaled(self.size(), Qt.KeepAspectRatio)
+        rect = QRect((self.width() - size.width()) // 2, (self.height() - size.height()) // 2,
+                     size.width(), size.height())
+        painter.drawImage(rect, self.image)
+        painter.end()
+
+
 class DiscoveryNote(QScrollArea):
     def __init__(self):
         super().__init__()
@@ -91,6 +113,26 @@ class DiscoveryNote(QScrollArea):
         reaction_layout.addLayout(thoughts, 1)
         layout.addWidget(reaction_card)
 
+        self.picture_card = surface()
+        picture_layout = QVBoxLayout(self.picture_card)
+        picture_layout.setContentsMargins(11, 8, 11, 10)
+        picture_layout.setSpacing(6)
+        self.picture_heading = label(role="section")
+        enlarge = button("查看大图")
+        enlarge.clicked.connect(self._view_picture)
+        controls = QHBoxLayout()
+        controls.addWidget(self.picture_heading)
+        controls.addStretch()
+        controls.addWidget(enlarge)
+        picture_layout.addLayout(controls)
+        self.picture_view = MemoryImage()
+        self.picture_view.setFixedHeight(162)
+        picture_layout.addWidget(self.picture_view)
+        self.picture_reason = label(role="muted", wrap=True)
+        picture_layout.addWidget(self.picture_reason)
+        layout.addWidget(self.picture_card)
+        self.picture_card.hide()
+
         evidence = QVBoxLayout()
         evidence.setContentsMargins(2, 0, 2, 0)
         evidence.setSpacing(5)
@@ -109,10 +151,10 @@ class DiscoveryNote(QScrollArea):
         next_layout.addWidget(self.next_topic)
         layout.addWidget(self.followup)
         layout.addStretch()
-        for text in (self.title, self.reaction, self.observation, self.next_topic):
+        for text in (self.title, self.reaction, self.picture_reason, self.observation, self.next_topic):
             text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
 
-    def show_entry(self, entry):
+    def show_entry(self, entry, picture=None):
         owner = read_url(entry["url"])
         domain = owner.hostname.removeprefix("www.") if owner else ""
         meta = [stamp(entry)]
@@ -123,6 +165,14 @@ class DiscoveryNote(QScrollArea):
         self.title.setText(entry["title"])
         self.provenance.setText("  ·  ".join(meta))
         self.reaction.setText(entry["reaction"])
+        image = QImage.fromData(picture.jpeg, "JPEG") if picture else QImage()
+        self.picture_view.set_image(image)
+        self.picture_card.setVisible(not image.isNull())
+        if picture:
+            origin = "来源页封面" if picture.kind == "cover" else "原页配图"
+            self.picture_heading.setText(f"我留下的图  ·  {origin}")
+            self.picture_reason.setText(picture.reason)
+            self.picture_reason.setVisible(bool(picture.reason))
         evidence = {"article": "网页正文", "metadata": "标题或简介", "transcript": "字幕或转写"}
         self.observation_heading.setText(f'我看到的  ·  {evidence.get(entry["evidence_kind"], "来源内容")}')
         self.observation.setText(entry["observation"])
@@ -130,6 +180,20 @@ class DiscoveryNote(QScrollArea):
         self.next_topic.setText(next_topic)
         self.followup.setVisible(bool(next_topic))
         self.verticalScrollBar().setValue(0)
+
+    def _view_picture(self):
+        if self.picture_view.image.isNull():
+            return
+        viewer = QDialog(self)
+        viewer.setWindowTitle(self.picture_heading.text())
+        layout = themed_layout(viewer, 700, 541, minimum_width=360)
+        large = MemoryImage()
+        large.set_image(self.picture_view.image)
+        layout.addWidget(large, 1)
+        close_button = button("关闭")
+        close_button.clicked.connect(viewer.accept)
+        layout.addWidget(close_button, 0, Qt.AlignRight)
+        viewer.exec()
 
 
 class ExplorationPanel(QDialog):
@@ -221,7 +285,8 @@ class ExplorationPanel(QDialog):
             for entry in entries:
                 origin = read_url(entry["url"])
                 site = origin.hostname.removeprefix("www.") if origin else entry["agent_name"]
-                add_card(self.history, entry["title"], f"{stamp(entry)}  ·  {site}")
+                picture_tag = "  ·  有图" if entry["has_picture"] else ""
+                add_card(self.history, entry["title"], f"{stamp(entry)}  ·  {site}{picture_tag}")
             selected = next((i for i, row in enumerate(entries) if row["id"] == previous_id), 0)
             self.history.setCurrentRow(selected)
             self.history.blockSignals(False)
@@ -260,7 +325,13 @@ class ExplorationPanel(QDialog):
             self.entry_id = None
         elif self.entry_id != entry["id"]:
             self.entry_id = entry["id"]
-            self.detail.show_entry(entry)
+            picture = None
+            if entry["has_picture"] and self.controller.diary is not None:
+                try:
+                    picture = self.controller.diary.picture(self.entry_id)
+                except sqlite3.Error:
+                    pass
+            self.detail.show_entry(entry, picture)
 
     def _open_source(self):
         index = self.history.currentRow()

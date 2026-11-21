@@ -6,8 +6,10 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
 import random
 import sqlite3
+from threading import Event, Thread
 import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl
@@ -22,6 +24,7 @@ from pet.exploration_agents import (
     parse_result, parse_website_reaction, parse_website_search, read_website_page, website_links,
 )
 from pet.exploration_panel import AgentSettingsPanel, ExplorationPanel, WebsiteSettingsPanel
+from pet.exploration_pictures import PICTURE_TIMEOUT, PictureCandidate, collect_pictures
 
 
 IDLE_BEFORE_EXPLORING = 10 * 60
@@ -44,6 +47,7 @@ class Outing:
     page_url: str = ""
     results: list = field(default_factory=list)
     links: list = field(default_factory=list)
+    pictures: list[PictureCandidate] = field(default_factory=list)
 
 
 class SystemCredentials:
@@ -86,6 +90,7 @@ class ExplorationController(QObject):
         self.panel = None
         self.settings_panel = None
         self.reply = None
+        self.picture_job = None
         self.outing = None
         self.buffer = bytearray()
         self.request_key = ""
@@ -109,6 +114,9 @@ class ExplorationController(QObject):
         self.deadline = QTimer(self)
         self.deadline.setSingleShot(True)
         self.deadline.timeout.connect(lambda: self._abort_request("这次逛得有点久，下次再去。"))
+        self.picture_timer = QTimer(self)
+        self.picture_timer.setInterval(70)
+        self.picture_timer.timeout.connect(self._check_pictures)
         window.exploration_requested.connect(self.open_panel)
         window.interaction_started.connect(self._touched)
         window.pet_tapped.connect(self._on_pet_tapped)
@@ -216,7 +224,7 @@ class ExplorationController(QObject):
                 if agent.enabled and (not automatic or agent.background)]
 
     def start_exploring(self, *, automatic=False):
-        if self.reply is not None or not self.is_active() or self.diary is None or self.closing:
+        if self.outing is not None or not self.is_active() or self.diary is None or self.closing:
             return
         now = datetime.now()
         try:
@@ -311,6 +319,9 @@ class ExplorationController(QObject):
         if self.reply is not None:
             self.request_error = reason
             self.reply.abort()
+        elif self.picture_job is not None:
+            self._stop_pictures()
+            self._finish_outing(reason)
 
     def _finished(self):
         if self.reply is None:
@@ -337,28 +348,38 @@ class ExplorationController(QObject):
                 problem = f"这次没连上「{agent.name}」。"
         reply.deleteLater()
 
+        if (outing.pictures and outing.stage == "reaction" and not self.request_error
+                and status in {400, 415, 422}):
+            self._post_website_reaction()
+            return
         try:
             if outing.website and self._continue_website(outing, problem):
                 return
             if not problem:
                 if outing.website:
                     discovery, learned = parse_website_reaction(
-                        self.buffer, outing.results, outing.links, outing.activity,
+                        self.buffer, outing.results, outing.links, outing.activity, outing.pictures,
                     )
                 else:
                     discovery = parse_result(agent, self.buffer)
                 key = self.request_key
                 if key and any(key == value or (len(key) >= 12 and key in value)
-                               for record in (discovery, learned) if record
+                               for record in (discovery, learned, discovery.picture if discovery else None) if record
                                for value in vars(record).values() if isinstance(value, str)):
                     discovery = learned = None
                     problem = "这个 Agent 把凭据写进了回复。"
         except (ValueError, RecursionError) as error:
+            if outing.stage == "reaction" and outing.pictures and not problem:
+                self._post_website_reaction()
+                return
             problem = str(error)
         except sqlite3.Error:
             problem = DIARY_ERROR
 
-        self.outing = None
+        self._finish_outing(problem, discovery, learned)
+
+    def _finish_outing(self, problem, discovery=None, learned=None):
+        outing, self.outing = self.outing, None
         self.request_key = ""
         self.rig.set_exploring(False)
         self.buffer.clear()
@@ -366,6 +387,8 @@ class ExplorationController(QObject):
             remembered = self.diary.finish(outing.id, discovery, website=learned)
             if remembered:
                 self.status = f"我记住了 {learned.domain}，改天还想去看看。"
+            elif discovery and discovery.picture:
+                self.status = "这一轮我留了一张图。"
             else:
                 self.status = problem
         except sqlite3.Error:
@@ -401,11 +424,56 @@ class ExplorationController(QObject):
         known_domains = self.diary.known_website_domains()
         text = "\n".join((outing.results[0]["observation"], page))
         outing.links = website_links(text, known_domains)
-        body = build_website_reaction(outing.agent, outing.activity, outing.results, outing.links)
+        page_lower = page.lower()
+        if outing.website.domain == BILIBILI_DOMAIN or any(
+                hint in page_lower for hint in ("![", "<img", "<video", "og:image", "twitter:image")):
+            self._start_pictures(page, outing.page_url)
+        else:
+            self._post_website_reaction()
+        return True
+
+    def _start_pictures(self, page, url):
+        result, cancelled = SimpleQueue(), Event()
+        self.picture_job = (result, cancelled, time.monotonic() + PICTURE_TIMEOUT)
+
+        def read_images():
+            try:
+                pictures = collect_pictures(page, url, cancelled)
+            except Exception:
+                pictures = []
+            if not cancelled.is_set():
+                result.put(pictures)
+
+        Thread(target=read_images, name="exploration-pictures", daemon=True).start()
+        self.picture_timer.start()
+
+    def _stop_pictures(self):
+        _, cancelled, _ = self.picture_job
+        cancelled.set()
+        self.picture_job = None
+        self.picture_timer.stop()
+
+    def _check_pictures(self):
+        if self.picture_job is None:
+            return
+        result, _, expires = self.picture_job
+        try:
+            pictures = result.get_nowait()
+        except Empty:
+            if time.monotonic() < expires:
+                return
+            pictures = []
+        self._stop_pictures()
+        self._post_website_reaction(pictures)
+
+    def _post_website_reaction(self, pictures=None):
+        outing = self.outing
+        outing.pictures = pictures or []
+        body = build_website_reaction(outing.agent, outing.activity, outing.results, outing.links,
+                                      outing.pictures)
         self._post(DEEPSEEK_CHAT_ENDPOINT, body, stage="reaction")
         self.status = f"我在挑 {outing.website.domain} 上感兴趣的内容。"
         self._refresh()
-        return True
 
     def _refresh(self):
         if self.panel is None:
@@ -424,7 +492,7 @@ class ExplorationController(QObject):
             except sqlite3.Error:
                 status = DIARY_ERROR
         self.panel.refresh(status, entries, available=available, connected=connected,
-                           exploring=self.reply is not None, quota=quota)
+                           exploring=self.outing is not None, quota=quota)
 
     def _touched(self):
         self.last_touch = time.monotonic()
@@ -480,7 +548,7 @@ class ExplorationController(QObject):
         now = time.monotonic()
         try:
             self._maybe_share(now)
-            if now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing and self.reply is None:
+            if now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing and self.outing is None:
                 self.next_outing = now + 60
                 self.start_exploring(automatic=True)
         except sqlite3.Error:
@@ -490,7 +558,7 @@ class ExplorationController(QObject):
     def shutdown(self):
         self.closing = True
         self.timer.stop()
-        if self.reply is not None:
+        if self.outing is not None:
             self._cancel("桌宠已退出。")
             if self.reply is not None:
                 self._finished()

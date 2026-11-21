@@ -96,9 +96,11 @@ python scripts/preview-pomodoro.py --export-dir preview/pomodoro
 
 #### 用 DeepSeek 逛你选的网站
 
-在「Agent 连接」添加 **DeepSeek · 网站探索**，填入 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 的 API Key。原有的 DeepSeek 连接和 Key 可以直接继续使用。打开「探索网站」，添加你想让她先逛的域名或网址。B 站是初始预设，可以移除。每轮从列表选一个网站，用 DeepSeek 搜索该站的公开内容，尝试读取一条结果，再让 `deepseek-flash` 从候选里选一条、写一句感想，一轮最多三次 API 请求。
+在「Agent 连接」添加 **DeepSeek · 网站探索**，填入 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 的 API Key。原有的 DeepSeek 连接和 Key 可以直接继续使用。打开「探索网站」，添加你想让她先逛的域名或网址。B 站是初始预设，可以移除。每轮从列表选一个网站，用 DeepSeek 搜索该站的公开内容，尝试读取一条结果，再让 `deepseek-flash` 从候选里选一条、写一句感想。常规一轮最多三次 API 请求。识图请求被拒绝时会额外重试一次纯文字。
 
 如果摘要或网页里出现了她有兴趣的站外链接，她可以把这个网站和发现来源记下来。她会在后续探索里回访，也可以从「她自己发现的」列表打开当时的来源或移除网站。移除的网站可以手动重新添加。视频笔记根据搜索拿到的资料生成。点「打开来源」可以在浏览器播放原视频。
+
+如果读到了公开文章配图或视频封面，DeepSeek 会看看哪一张能勾起大肥鱼的兴趣。每轮最多留下一张，连同她想留图的理由保存在本地日记里。左边有「有图」提示，打开笔记就能回看，也可以点「查看大图」。图片无法读取时，日记仍会记录文字发现。
 
 #### 接入自定义 Agent
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
+from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -29,6 +31,7 @@ from pet.exploration_agents import (
 )
 from pet.exploration_controller import ExplorationController, IDLE_BEFORE_EXPLORING
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
+from pet.exploration_pictures import collect_pictures
 from pet.window import PetWindow
 
 
@@ -48,6 +51,8 @@ VIDEO_RESULT = {
     "reaction": "这回先收藏一下。",
 }
 BILIBILI_URL = "https://www.bilibili.com/video/BV1TestFish/"
+PICTURE_URL = "https://images.example.net/art.png"
+PICTURE_REASON = "这张图里的海蓝色我想留着。"
 LINKED_SITE = "birdnotes.example.org"
 LINKED_PAGE = f"https://{LINKED_SITE}/shore"
 BILIBILI_SEARCH_RESULT = {"results": [
@@ -58,7 +63,8 @@ BILIBILI_SEARCH_RESULT = {"results": [
 ]}
 BILIBILI_REACTION = {"choices": [{"message": {"content": json.dumps(
     {"choice": 1, "reaction": "鲸鲸，想看看是哪种小鸟。", "next_topic": "海边常见小鸟",
-     "site_choice": 1, "url": "https://www.example.org/ignored", "observation": "我看到了未证实的画面。"},
+     "site_choice": 1, "url": "https://www.example.org/ignored", "observation": "我看到了未证实的画面。",
+     "picture_choice": 1, "picture_reason": PICTURE_REASON},
 )}}]}
 BILIBILI_PAGE = {"title": "海边的小鸟", "content": (
     f"视频简介推荐了[海边观鸟资料]({LINKED_PAGE}?from=video)。\n"
@@ -66,6 +72,36 @@ BILIBILI_PAGE = {"title": "海边的小鸟", "content": (
     "[另一个站内视频](https://www.bilibili.com/video/BV1MoreFish/)"
 )}
 LINKED_DOCUMENT = {"title": "岸边观鸟笔记", "content": "这里整理了岸边常见的小鸟。"}
+
+
+def picture_bytes():
+    buffer = BytesIO()
+    Image.new("RGB", (320, 240), "#70a6dc").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class PictureCollectionTests(unittest.TestCase):
+    def test_video_cover_comes_from_page_metadata_and_decodes(self):
+        legacy_url = PICTURE_URL.replace("https:", "http:", 1)
+        html = f'<meta property="og:image" content="{legacy_url}">'
+        with patch("pet.exploration_pictures._download", side_effect=[html.encode(), picture_bytes()]) as get:
+            pictures = collect_pictures("", BILIBILI_URL, threading.Event())
+        self.assertEqual([call.args[0] for call in get.call_args_list], [BILIBILI_URL, PICTURE_URL])
+        picture, = pictures
+        self.assertEqual((picture.url, picture.kind), (PICTURE_URL, "cover"))
+        with Image.open(BytesIO(picture.jpeg)) as image:
+            self.assertEqual(image.size, (320, 240))
+
+    def test_article_uses_public_picture_links_and_skips_non_images(self):
+        page = (
+            "![不可用](https://127.0.0.1/image.png)\n"
+            "![相对链接](/bird.png)\n"
+            "![配图](https://images.example.net/art.png)"
+        )
+        with patch("pet.exploration_pictures._download", side_effect=[b"<html>", picture_bytes()]) as get:
+            pictures = collect_pictures(page, "https://example.org/articles/1", threading.Event())
+        self.assertEqual([call.args[0] for call in get.call_args_list], ["https://example.org/bird.png", PICTURE_URL])
+        self.assertEqual([p.url for p in pictures], [PICTURE_URL])
 
 
 def openai_connection():
@@ -179,6 +215,10 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.send_header("Location", "/video")
             self.end_headers()
             return
+        if self.path == "/vision-error":
+            self.send_response(400)
+            self.end_headers()
+            return
         result = {
             "/video": VIDEO_RESULT,
             "/deepseek-search": BILIBILI_SEARCH_RESULT,
@@ -216,6 +256,9 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.addCleanup(self.folder.cleanup)
         self.path = Path(self.folder.name) / "diary.sqlite3"
         self.credentials = Mock()
+        fixture = patch("pet.exploration_pictures._download", return_value=b"")
+        self.image_download = fixture.start()
+        self.addCleanup(fixture.stop)
         self.make_pet()
 
     def make_pet(self):
@@ -245,9 +288,9 @@ class ExplorationIntegrationTests(unittest.TestCase):
 
     def finish_round(self):
         stop = time.monotonic() + 5
-        while self.controller.reply is not None and time.monotonic() < stop:
+        while self.controller.outing is not None and time.monotonic() < stop:
             QTest.qWait(20)
-        self.assertIsNone(self.controller.reply, "the Qt network request did not finish")
+        self.assertIsNone(self.controller.outing, "the exploration outing did not finish")
 
     def test_reading_an_older_note_keeps_its_scroll_and_source_on_refresh(self):
         diary = self.controller.diary
@@ -371,6 +414,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
 
     def test_deepseek_rotates_presets_and_revisits_a_learned_website_after_restart(self):
         secret = "deepseek-test-key"
+        self.image_download.side_effect = lambda url, **_kw: picture_bytes() if url == PICTURE_URL else b""
         self.credentials.get.return_value = secret
         self.controller.open_panel()
         settings = AgentSettingsPanel(self.controller, self.controller.panel)
@@ -426,15 +470,26 @@ class ExplorationIntegrationTests(unittest.TestCase):
             chat_body = self.server.received[2][1]
             self.assertTrue(search_body["query"].endswith("site:bilibili.com"))
             self.assertEqual(chat_body["model"], DEEPSEEK_MODEL)
+            parts = chat_body["messages"][1]["content"]
+            self.assertTrue(parts[-1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
             self.assertNotIn(secret, json.dumps(chat_body))
             self.assertEqual(self.controller.panel.quota.text(), "今日探索 1/4 轮")
             self.assertIn(f"记住了 {LINKED_SITE}", self.controller.status)
             remembered = self.controller.diary.websites()[-1]
             self.assertEqual((remembered.kind, remembered.source_url, remembered.link_url),
                              ("learned", BILIBILI_URL, LINKED_PAGE))
+            self.assertTrue(entry["has_picture"])
+            picture = self.controller.diary.picture(entry["id"])
+            self.assertEqual((picture.url, picture.reason), (PICTURE_URL, PICTURE_REASON))
+            self.assertFalse(self.controller.panel.detail.picture_view.image.isNull())
 
         self.close_pet(self.controller, self.window)
         self.make_pet()
+        self.image_download.reset_mock()
+        self.controller.open_panel()
+        self.assertFalse(self.controller.panel.detail.picture_view.image.isNull())
+        self.assertEqual(self.controller.panel.detail.picture_reason.text(), PICTURE_REASON)
+        self.image_download.assert_not_called()
         send = self.controller.network.post
         fixture_paths[DEEPSEEK_SEARCH_ENDPOINT] = "/deepseek-empty"
         fixture_paths[DEEPSEEK_FETCH_ENDPOINT] = "/deepseek-linked-page"
@@ -447,6 +502,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
             self.assertEqual(self.server.received[4][1]["url"], LINKED_PAGE)
             self.assertEqual(self.controller.diary.recent()[0]["url"], LINKED_PAGE)
             self.assertEqual(self.controller.diary.recent()[0]["evidence_kind"], "article")
+            self.assertFalse(self.controller.diary.recent()[0]["has_picture"])
 
             self.controller.remove_website(LINKED_SITE)
             self.assertNotIn(LINKED_SITE, {site.domain for site in self.controller.diary.websites()})
@@ -457,6 +513,33 @@ class ExplorationIntegrationTests(unittest.TestCase):
             self.assertTrue(self.server.received[6][1]["query"].endswith("site:example.net"))
             self.assertIn("没在 example.net 找到合适的公开内容", self.controller.status)
             self.assertIsNone(self.controller.outing)
+
+    def test_vision_rejection_retries_as_text_without_losing_the_note(self):
+        secret = "deepseek-test-key"
+        self.credentials.get.return_value = secret
+        self.image_download.side_effect = lambda url, **_kw: picture_bytes() if url == PICTURE_URL else b""
+        self.assertEqual(self.controller.save_connection(deepseek_connection(), None, secret), "")
+        send = self.controller.network.post
+
+        def fixture_post(request, body):
+            endpoint = request.url().toString()
+            if endpoint == DEEPSEEK_SEARCH_ENDPOINT:
+                path = "/deepseek-search"
+            elif endpoint == DEEPSEEK_FETCH_ENDPOINT:
+                path = "/deepseek-bilibili-page"
+            else:
+                content = json.loads(bytes(body))["messages"][1]["content"]
+                path = "/vision-error" if isinstance(content, list) else "/deepseek-chat"
+            request.setUrl(QUrl(f"http://127.0.0.1:{self.server.server_port}{path}"))
+            return send(request, body)
+
+        with patch.object(self.controller.network, "post", side_effect=fixture_post):
+            self.controller.start_exploring()
+            self.finish_round()
+        self.assertEqual([record[0] for record in self.server.received][-2:], ["/vision-error", "/deepseek-chat"])
+        note, = self.controller.diary.recent()
+        self.assertEqual(note["url"], BILIBILI_URL)
+        self.assertFalse(note["has_picture"])
 
     def test_custom_agent_redirect_is_not_followed(self):
         connection = self.connection("redirect", "web")

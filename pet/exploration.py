@@ -134,6 +134,14 @@ class AgentConnection:
 
 
 @dataclass(frozen=True)
+class ExplorationPicture:
+    url: str
+    kind: str
+    reason: str
+    jpeg: bytes
+
+
+@dataclass(frozen=True)
 class Discovery:
     title: str
     url: str
@@ -141,6 +149,7 @@ class Discovery:
     observation: str
     reaction: str
     next_topic: str = ""
+    picture: ExplorationPicture | None = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +216,10 @@ class ExplorationDiary:
                     observation TEXT, reaction TEXT, next_topic TEXT, shared INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS outings_by_day ON outings(local_day);
+                CREATE TABLE IF NOT EXISTS exploration_pictures (
+                    outing_id INTEGER PRIMARY KEY REFERENCES outings (id) ON DELETE CASCADE,
+                    url TEXT NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, jpeg BLOB NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS exploration_websites (
                     domain TEXT PRIMARY KEY, kind TEXT NOT NULL,
                     link_url TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL DEFAULT '',
@@ -281,7 +294,7 @@ class ExplorationDiary:
             if self.calls_on(day) >= allowance:
                 raise ValueError("今天的探索次数用完啦。")
             if self.db.execute(
-                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1", (now - 120,)
+                "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1", (now - 150,)
             ).fetchone():
                 raise ValueError("已经在逛啦。")
             if website and not self.db.execute("""
@@ -306,6 +319,11 @@ class ExplorationDiary:
                         observation = ?, reaction = ?, next_topic = ? WHERE id = ?
                     """, (discovery.title, discovery.url, discovery.evidence_kind, discovery.observation,
                           discovery.reaction, discovery.next_topic, outing_id))
+                if discovery.picture:
+                    picture = discovery.picture
+                    self.db.execute("""
+                        INSERT OR REPLACE INTO exploration_pictures VALUES (?, ?, ?, ?, ?)
+                        """, (outing_id, picture.url, picture.kind, picture.reason, picture.jpeg))
                 if website:
                     inserted = self.db.execute("""
                         INSERT OR IGNORE INTO exploration_websites (domain, kind, link_url, source_url, topic)
@@ -316,8 +334,16 @@ class ExplorationDiary:
 
     def recent(self, limit=25):
         return self.db.execute(
-            "SELECT * FROM outings WHERE state = 'done' ORDER BY id DESC LIMIT ?", (limit,)
+            """SELECT outings.*, EXISTS (
+                   SELECT 1 FROM exploration_pictures WHERE outing_id = outings.id
+               ) AS has_picture FROM outings WHERE state = 'done' ORDER BY id DESC LIMIT ?""", (limit,)
         ).fetchall()
+
+    def picture(self, outing_id):
+        row = self.db.execute(
+            "SELECT url, kind, reason, jpeg FROM exploration_pictures WHERE outing_id = ?", (outing_id,)
+        ).fetchone()
+        return ExplorationPicture(**dict(row)) if row is not None else None
 
     def latest_unshared(self):
         return self.db.execute(

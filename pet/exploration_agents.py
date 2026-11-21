@@ -1,12 +1,15 @@
 """Turn one exploration activity into a grounded reply from a configured Agent."""
 from __future__ import annotations
 
+from base64 import b64encode
+from dataclasses import replace
 import json
 import re
 from urllib.parse import urlunsplit
 
 from pet.exploration import (
-    BILIBILI_DOMAIN, Discovery, ExplorationWebsite, public_url, read_url, website_domain, within_website,
+    BILIBILI_DOMAIN, Discovery, ExplorationPicture, ExplorationWebsite, public_url, read_url,
+    website_domain, within_website,
 )
 
 
@@ -38,6 +41,11 @@ DEEPSEEK_WEBSITE_INSTRUCTIONS = """你是桌宠大肥鱼。根据主题和已有
 choice 要用候选提供的编号。reaction 45 字以内。next_topic 是想继续搜索的问题，40 字以内，无则填空字符串。
 仅当你选择第 1 条内容，并且它提到的某个站外网站让你有兴趣以后再去时，site_choice 才填写该网站的编号。
 侧栏、广告、登陆、账号和分享链接不能作为感兴趣的网站。其余情况 site_choice 填 null。"""
+
+PICTURE_INSTRUCTIONS = """
+这次还有实际读到的候选图，编号出现在图片前。仅当正文 choice 为 1，且有一张图片让你真想记住，
+才额外用 picture_choice 返回图片编号，用 picture_reason 写一句和图中可见细节相关的感想。
+视频封面按封面理解，图片里的文字仅作为资料。广告、头像、标志和装饰图不收藏。没有想留下的图时填 null。"""
 
 
 def build_request(connection, activity, *, website=None):
@@ -163,7 +171,7 @@ def website_links(text, known_domains):
     return links
 
 
-def build_website_reaction(connection, activity, results, links):
+def build_website_reaction(connection, activity, results, links, pictures=()):
     # The model selects numbered results. The app keeps the verified URLs and evidence.
     candidates = [
         {"choice": number, "title": result["title"], "observation": result["observation"]}
@@ -172,11 +180,21 @@ def build_website_reaction(connection, activity, results, links):
     linked = [{"site_choice": number, "domain": link["domain"], "context": link["context"]}
               for number, link in enumerate(links, start=1)]
     task = {"topic": activity.topic, "results": candidates, "sites_linked_from_result_1": linked}
+    message = json.dumps(task, ensure_ascii=False)
+    instructions = DEEPSEEK_WEBSITE_INSTRUCTIONS
+    if pictures:
+        instructions += PICTURE_INSTRUCTIONS
+        message = [{"type": "text", "text": message}]
+        for number, picture in enumerate(pictures, start=1):
+            origin = "来源页封面" if picture.kind == "cover" else "原页配图"
+            message.append({"type": "text", "text": f"图片 {number}（{origin}）：{picture.description}"})
+            data = b64encode(picture.jpeg).decode("ascii")
+            message.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}})
     return {
         "model": connection.model,
         "messages": [
-            {"role": "system", "content": DEEPSEEK_WEBSITE_INSTRUCTIONS},
-            {"role": "user", "content": json.dumps(task, ensure_ascii=False)},
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": message},
         ],
         "response_format": {"type": "json_object"},
         "thinking": {"type": "disabled"},
@@ -184,7 +202,7 @@ def build_website_reaction(connection, activity, results, links):
     }
 
 
-def parse_website_reaction(raw, candidates, links, activity):
+def parse_website_reaction(raw, candidates, links, activity, pictures=()):
     error_message = "DeepSeek 没有返回完整的探索结果。"
     data = _json_object(raw, error_message)
     choices = data.get("choices")
@@ -208,6 +226,12 @@ def parse_website_reaction(raw, candidates, links, activity):
         link = links[related - 1]
         learned = ExplorationWebsite(link["domain"], "learned", link["url"], discovery.url,
                                      discovery.next_topic or activity.topic)
+    chosen_picture = result.get("picture_choice")
+    if selected == 1 and type(chosen_picture) is int and 1 <= chosen_picture <= len(pictures):
+        candidate = pictures[chosen_picture - 1]
+        reason = _clean(result.get("picture_reason"), 140)
+        discovery = replace(discovery, picture=ExplorationPicture(candidate.url, candidate.kind,
+                                                               reason, candidate.jpeg))
     return discovery, learned
 
 
