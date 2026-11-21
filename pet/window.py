@@ -51,7 +51,6 @@ class PetWindow(QWidget):
     drag_ended = Signal()
     drag_moved = Signal(float)
     interaction_started = Signal()
-    hook_config_requested = Signal()
     character_switch_requested = Signal()
     pomodoro_requested = Signal()
     work_mode_requested = Signal()
@@ -658,16 +657,6 @@ class PetWindow(QWidget):
         sep1.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
         layout.addWidget(sep1)
 
-        hook_btn = QPushButton("配置Hook")
-        hook_btn.setCursor(Qt.PointingHandCursor)
-        hook_btn.clicked.connect(lambda: self._on_menu_action(popup, "hook"))
-        layout.addWidget(hook_btn)
-
-        sep2 = QWidget()
-        sep2.setFixedHeight(1)
-        sep2.setStyleSheet("background: rgba(255,255,255,0.10); margin: 3px 8px;")
-        layout.addWidget(sep2)
-
         quit_btn = QPushButton("退出")
         quit_btn.setCursor(Qt.PointingHandCursor)
         quit_btn.clicked.connect(lambda: self._on_menu_action(popup, "quit"))
@@ -710,8 +699,6 @@ class PetWindow(QWidget):
             self.work_mode_requested.emit()
         elif action == "exploration":
             self.exploration_requested.emit()
-        elif action == "hook":
-            self.hook_config_requested.emit()
         elif action == "quit":
             self.quit_requested.emit()
 

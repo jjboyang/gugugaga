@@ -15,9 +15,9 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QUrl, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from pet.exploration import (
     Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
@@ -229,8 +229,14 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.addCleanup(self.close_pet, self.controller, self.window)
 
     def close_pet(self, controller, window):
+        if controller.closing:
+            return
         controller.shutdown()
+        if controller.panel:
+            controller.panel.close()
         window.close()
+        window.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
 
     def connection(self, id, capability, *, background=True):
@@ -242,6 +248,49 @@ class ExplorationIntegrationTests(unittest.TestCase):
         while self.controller.reply is not None and time.monotonic() < stop:
             QTest.qWait(20)
         self.assertIsNone(self.controller.reply, "the Qt network request did not finish")
+
+    def test_reading_an_older_note_keeps_its_scroll_and_source_on_refresh(self):
+        diary = self.controller.diary
+        agent = self.connection("web", "web")
+        now = datetime.now()
+        for offset in (2, 1):
+            item = diary.reserve(agent, Activity("海鸟", "web", "海鸟"), now.timestamp() - offset,
+                                 now.date().isoformat(), 3)
+            note = Discovery(**WEB_RESULT)
+            if offset == 2:
+                note = replace(note, title="第一次的探索", observation=note.observation * 25)
+            else:
+                note = replace(note, title="刚带回来的发现", url="https://example.org/recent")
+            diary.finish(item, note)
+        self.window.exploration_requested.emit()
+        panel = self.controller.panel
+        panel.resize(620, 420)
+        panel.history.setCurrentRow(1)
+        self.app.processEvents()
+        scroll = panel.detail.verticalScrollBar()
+        self.assertGreater(scroll.maximum(), 0)
+        scroll.setValue(scroll.maximum())
+        self.controller._refresh()
+        self.assertEqual(panel.detail.title.text(), "第一次的探索")
+        self.assertGreater(scroll.value(), 0)
+        self.assertTrue(panel.source.isVisible())
+        with patch("pet.exploration_panel.QDesktopServices.openUrl") as open_url:
+            panel.source.click()
+        self.assertEqual(open_url.call_args.args[0].toString(), WEB_RESULT["url"])
+
+    def test_desktop_menu_omits_hook_configuration_for_both_characters(self):
+        for character in ("dafeiyu", "penguin"):
+            with self.subTest(character=character):
+                self.window.set_character(character)
+                self.window.contextMenuEvent(None)
+                popup = self.app.activePopupWidget()
+                try:
+                    names = [item.text() for item in popup.findChildren(QPushButton)]
+                    self.assertIn("设置", names)
+                    self.assertFalse(any("hook" in name.lower() for name in names))
+                finally:
+                    popup.close()
+                    self.app.processEvents()
 
     def test_idle_outing_follows_a_saved_thread_on_another_agent_after_restart(self):
         web = self.connection("web", "web")
@@ -274,7 +323,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertEqual(request["topic"], WEB_RESULT["next_topic"])
         self.assertEqual(request["previous"]["url"], WEB_RESULT["url"])
         self.assertEqual(self.controller.panel.history.count(), 2)
-        self.assertIn("标题或简介", self.controller.panel.detail.toPlainText())
+        self.assertIn("标题或简介", self.controller.panel.detail.observation_heading.text())
         self.controller.start_exploring()
         self.assertIsNone(self.controller.reply)
         self.assertIn("次数用完", self.controller.status)
@@ -362,6 +411,8 @@ class ExplorationIntegrationTests(unittest.TestCase):
 
         with patch.object(self.controller.network, "post", side_effect=fixture_post):
             self.controller.panel.explore.click()
+            self.assertEqual(self.controller.panel.empty_text.text(), "新发现会记在这里。")
+            self.assertFalse(self.controller.panel.explore.isEnabled())
             self.finish_round()
             self.assertEqual(endpoints, full_round)
             self.assertEqual(self.controller.panel.history.count(), 1)
@@ -376,7 +427,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
             self.assertTrue(search_body["query"].endswith("site:bilibili.com"))
             self.assertEqual(chat_body["model"], DEEPSEEK_MODEL)
             self.assertNotIn(secret, json.dumps(chat_body))
-            self.assertIn("今日探索 1/4 轮", self.controller.panel.status.text())
+            self.assertEqual(self.controller.panel.quota.text(), "今日探索 1/4 轮")
             self.assertIn(f"记住了 {LINKED_SITE}", self.controller.status)
             remembered = self.controller.diary.websites()[-1]
             self.assertEqual((remembered.kind, remembered.source_url, remembered.link_url),

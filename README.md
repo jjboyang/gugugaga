@@ -76,7 +76,7 @@ python pet_app.py
 
 数据保存在 `~/.desktop-pet/pomodoro.json`，可用 `DESKTOP_PET_POMODORO_PATH` 指定其他位置。运行中每 5 秒保存一次，正常退出会保存并暂停；重新启动时手动继续，离线时间不计入。异常退出最多丢失最近约 5 秒的记录。保存失败会在面板提示；无法读取的原始记录会保留，本次会话暂时只在内存中计时。
 
-番茄计时与 Claude Hook 独立运行；拖拽时保留原来的拎起动作，松手后恢复番茄状态。角色动作适用于大肥鱼，切换企鹅时计时和统计仍继续。
+拖拽时保留拎起动作，松手后恢复番茄状态。角色动作适用于大肥鱼，切换企鹅时计时和统计仍继续。
 
 番茄姿势使用与角色一致的透明插画，手和电脑、杯子、手铃一同参与网格动画。暂停保留当前画面，继续时接着播放。可查看 [调整前后](docs/pomodoro/before-after.png) 和 [实际动画预览](docs/pomodoro/animation.mp4)。导出实际动画与浅色/深色背景预览：
 
@@ -131,30 +131,6 @@ python scripts/preview-pomodoro.py --export-dir preview/pomodoro
 
 `evidence_kind` 可填 `article`（网页正文）、`metadata`（标题或简介）或 `transcript`（可读取的字幕或转写）。视频能力用后两种。`next_topic` 为空时，大肥鱼可以去找新的话题。
 
-### 配置 Claude Code Hook
-
-右键点击企鹅 → **配置Hook**，自动将 Hook 写入 `~/.claude/settings.json`。重启 Claude Code 即可生效。
-
-也可手动配置，参考模板见 `pet_app.py` 中的 `PET_HOOKS_TEMPLATE`。
-
-### 配置权限审批桥接 (可选)
-
-桌宠可作为 Claude Code 权限审批面板，将 CLI 权限弹窗以图形化方式展示：
-
-1. 启动桌宠（确保能收到 IPC 信号）
-2. 右键点击企鹅 → **配置Hook**，确保 pet hooks 已写入
-3. 在 `~/.claude/settings.json` 的 hooks 中手动添加：
-
-```json
-"PermissionRequest": [
-  {"command": "python /path/to/desktop-pet/scripts/permission-hook.py"}
-]
-```
-
-> 请将路径替换为实际仓库路径。
-
-之后每次 Claude Code 弹出权限审批时，企鹅旁会出现带按钮的提问面板（Yes / Yes, allow all / No）。
-
 ### 从外部脚本发起提问
 
 ```bash
@@ -172,7 +148,7 @@ echo '{"text":"请选择一个","options":[...]}' | python scripts/ask-via-pet.p
 | 拖拽企鹅 | 移动到任意位置，带摇摆物理效果 |
 | 单击企鹅 | 唤醒（如果在睡觉或 waddle） |
 | 快速连点 4 次 | 触发愤怒动画 |
-| 右键企鹅 | 弹出自定义面板（配置Hook / 退出） |
+| 右键企鹅 | 打开桌宠菜单 |
 | 三击宠物肚子（下方 45% 区域，1.5 秒内） | 大肥鱼随机回复「鲸鲸」「deep deep」「seek seek」「别吵别吵」，连续两次不重复；企鹅回复「咕咕嘎嘎」 |
 
 连点回复采用角色配色的圆润对话气泡：大肥鱼为蓝白渐变、深蓝文字和台词对应的小插画，企鹅为暖白配色。气泡带指向宠物的小尾巴，轻轻弹出，约 2.4 秒后淡出；跟随宠物移动并避开屏幕边缘，不抢焦点、不拦截鼠标。切换角色会清除当前气泡和未完成的连点。

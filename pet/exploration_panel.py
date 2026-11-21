@@ -8,60 +8,210 @@ from uuid import uuid4
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
+    QAbstractSpinBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QLineEdit, QProgressBar, QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from pet.exploration import (
     AgentConnection, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
-    ExplorationSettings, OPENAI_ENDPOINT, public_url,
+    ExplorationSettings, OPENAI_ENDPOINT, public_url, read_url, website_domain,
+)
+from pet.exploration_ui import (
+    ConnectorPicker, Toggle, add_card, button, card_list, character, header, label, surface, themed_layout,
 )
 
 
-def plain_label(parent):
-    label = QLabel(parent)
-    label.setTextFormat(Qt.PlainText)
-    label.setWordWrap(True)
-    return label
+def stamp(entry):
+    date = datetime.fromtimestamp(entry["started"])
+    return f"{date.month}月{date.day}日"
+
+
+def heading_row(title, trailing):
+    row = QHBoxLayout()
+    row.addWidget(label(title, "section"))
+    row.addStretch()
+    row.addWidget(trailing)
+    return row
+
+
+def form_layout(parent):
+    form = QFormLayout(parent)
+    form.setContentsMargins(14, 13, 14, 13)
+    form.setHorizontalSpacing(18)
+    form.setVerticalSpacing(8)
+    form.setLabelAlignment(Qt.AlignLeft)
+    form.setFormAlignment(Qt.AlignTop)
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    return form
+
+
+def dialog_actions(parent, primary, cancel):
+    actions = QDialogButtonBox(parent)
+    actions.addButton(button(primary, "primary"), QDialogButtonBox.AcceptRole)
+    actions.addButton(button(cancel), QDialogButtonBox.RejectRole)
+    actions.accepted.connect(parent._save)
+    actions.rejected.connect(parent.reject)
+    return actions
+
+
+class DiscoveryNote(QScrollArea):
+    def __init__(self):
+        super().__init__()
+        self.setAccessibleName("探索笔记")
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setAutoFillBackground(False)
+        content.setStyleSheet("QWidget#noteContents { background: #fcfdff; }")
+        content.setObjectName("noteContents")
+        self.viewport().setAutoFillBackground(False)
+        self.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(2, 2, 8, 6)
+        layout.setSpacing(11)
+
+        self.title = label(role="noteTitle", wrap=True)
+        self.provenance = label(role="muted", wrap=True)
+        title_group = QVBoxLayout()
+        title_group.setSpacing(4)
+        title_group.addWidget(self.title)
+        title_group.addWidget(self.provenance)
+        layout.addLayout(title_group)
+
+        reaction_card = surface("bubble")
+        reaction_layout = QHBoxLayout(reaction_card)
+        reaction_layout.setContentsMargins(10, 8, 12, 8)
+        reaction_layout.setSpacing(9)
+        reaction_layout.addWidget(character("thinking", 37), 0, Qt.AlignTop)
+        thoughts = QVBoxLayout()
+        thoughts.setSpacing(2)
+        thoughts.addWidget(label("大肥鱼说", "muted"))
+        self.reaction = label(role="reaction", wrap=True)
+        thoughts.addWidget(self.reaction)
+        reaction_layout.addLayout(thoughts, 1)
+        layout.addWidget(reaction_card)
+
+        evidence = QVBoxLayout()
+        evidence.setContentsMargins(2, 0, 2, 0)
+        evidence.setSpacing(5)
+        self.observation_heading = label(role="section")
+        self.observation = label(wrap=True)
+        evidence.addWidget(self.observation_heading)
+        evidence.addWidget(self.observation)
+        layout.addLayout(evidence)
+
+        self.followup = surface("followup")
+        next_layout = QVBoxLayout(self.followup)
+        next_layout.setContentsMargins(12, 8, 12, 9)
+        next_layout.setSpacing(3)
+        next_layout.addWidget(label("下次想找", "section"))
+        self.next_topic = label(wrap=True)
+        next_layout.addWidget(self.next_topic)
+        layout.addWidget(self.followup)
+        layout.addStretch()
+        for text in (self.title, self.reaction, self.observation, self.next_topic):
+            text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+
+    def show_entry(self, entry):
+        owner = read_url(entry["url"])
+        domain = owner.hostname.removeprefix("www.") if owner else ""
+        meta = [stamp(entry)]
+        if domain:
+            meta.append(domain)
+        if entry["agent_name"]:
+            meta.append(entry["agent_name"])
+        self.title.setText(entry["title"])
+        self.provenance.setText("  ·  ".join(meta))
+        self.reaction.setText(entry["reaction"])
+        evidence = {"article": "网页正文", "metadata": "标题或简介", "transcript": "字幕或转写"}
+        self.observation_heading.setText(f'我看到的  ·  {evidence.get(entry["evidence_kind"], "来源内容")}')
+        self.observation.setText(entry["observation"])
+        next_topic = entry["next_topic"] or ""
+        self.next_topic.setText(next_topic)
+        self.followup.setVisible(bool(next_topic))
+        self.verticalScrollBar().setValue(0)
 
 
 class ExplorationPanel(QDialog):
     def __init__(self, controller):
         super().__init__(controller.window, Qt.Window)
         self.controller = controller
+        self.entries = []
+        self.entry_id = None
         self.setWindowTitle("大肥鱼在干嘛")
-        self.resize(520, 510)
+        self.setMinimumHeight(420)
+        layout = themed_layout(self, 736, 580, minimum_width=620)
 
-        layout = QVBoxLayout(self)
-        self.status = plain_label(self)
-        layout.addWidget(self.status)
-        self.history = QListWidget(self)
-        self.history.setAccessibleName("探索记录")
+        metric = QWidget()
+        metric_layout = QVBoxLayout(metric)
+        metric_layout.setSpacing(3)
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        metric_layout.setAlignment(Qt.AlignVCenter)
+        self.quota = label(role="section")
+        self.quota.setAlignment(Qt.AlignRight)
+        metric_layout.addWidget(self.quota)
+        self.progress = QProgressBar()
+        self.progress.setAccessibleName("今日探索进度")
+        self.progress.setTextVisible(False)
+        metric_layout.addWidget(self.progress)
+        metric.setFixedWidth(108)
+        self.metric = metric
+        banner, self.status = header("探索日记", "reading", metric=metric, art_size=70)
+        layout.addWidget(banner)
+
+        content = QHBoxLayout()
+        content.setSpacing(11)
+        timeline = surface()
+        timeline.setFixedWidth(208)
+        timeline_layout = QVBoxLayout(timeline)
+        timeline_layout.setContentsMargins(11, 12, 11, 10)
+        timeline_layout.setSpacing(8)
+        self.history_count = label(role="muted")
+        timeline_layout.addLayout(heading_row("探索记录", self.history_count))
+        self.history = card_list("探索记录")
         self.history.currentRowChanged.connect(self._show_entry)
-        layout.addWidget(self.history, 1)
-        self.detail = QTextEdit(self)
-        self.detail.setReadOnly(True)
-        self.detail.setAccessibleName("探索笔记")
-        layout.addWidget(self.detail, 1)
+        timeline_layout.addWidget(self.history, 1)
+        content.addWidget(timeline, 0, Qt.AlignTop)
+
+        sheet = surface()
+        sheet_layout = QVBoxLayout(sheet)
+        sheet_layout.setContentsMargins(15, 12, 13, 11)
+        sheet_layout.setSpacing(7)
+        self.pages = QStackedWidget()
+        self.detail = DiscoveryNote()
+        self.pages.addWidget(self.detail)
+        empty = QWidget()
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.setAlignment(Qt.AlignCenter)
+        empty_layout.setSpacing(9)
+        empty_layout.addWidget(character("thinking", 87), 0, Qt.AlignHCenter)
+        self.empty_text = label("去逛一会儿，我会把新发现记下来。", "muted", wrap=True)
+        self.empty_text.setAlignment(Qt.AlignCenter)
+        empty_layout.addWidget(self.empty_text)
+        self.pages.addWidget(empty)
+        sheet_layout.addWidget(self.pages, 1)
+
+        self.source = button("打开来源")
+        self.source.clicked.connect(self._open_source)
+        sheet_layout.addWidget(self.source, 0, Qt.AlignRight)
+        content.addWidget(sheet, 1)
+        layout.addLayout(content, 1)
 
         actions = QHBoxLayout()
-        self.source = QPushButton("打开来源", self)
-        self.source.clicked.connect(self._open_source)
-        actions.addWidget(self.source)
-        actions.addStretch()
-        self.websites_button = QPushButton("探索网站", self)
+        actions.setSpacing(8)
+        self.websites_button = button("探索网站")
         self.websites_button.clicked.connect(controller.open_websites)
         actions.addWidget(self.websites_button)
-        self.settings_button = QPushButton("Agent 连接", self)
+        self.settings_button = button("Agent 连接")
         self.settings_button.clicked.connect(controller.open_settings)
         actions.addWidget(self.settings_button)
-        self.explore = QPushButton("去逛一会儿", self)
+        actions.addStretch()
+        self.explore = button("去逛一会儿", "primary")
         self.explore.clicked.connect(lambda: controller.start_exploring())
         actions.addWidget(self.explore)
         layout.addLayout(actions)
-        self.entries = []
 
-    def refresh(self, status, entries, *, available, can_start):
+    def refresh(self, status, entries, *, available, connected, exploring, quota):
         previous = self.history.currentRow()
         previous_id = self.entries[previous]["id"] if 0 < previous < len(self.entries) else None
         if [row["id"] for row in self.entries] != [row["id"] for row in entries]:
@@ -69,29 +219,48 @@ class ExplorationPanel(QDialog):
             self.history.blockSignals(True)
             self.history.clear()
             for entry in entries:
-                stamp = datetime.fromtimestamp(entry["started"]).strftime("%m-%d")
-                self.history.addItem(f'{stamp}  {entry["title"]}')
+                origin = read_url(entry["url"])
+                site = origin.hostname.removeprefix("www.") if origin else entry["agent_name"]
+                add_card(self.history, entry["title"], f"{stamp(entry)}  ·  {site}")
             selected = next((i for i, row in enumerate(entries) if row["id"] == previous_id), 0)
             self.history.setCurrentRow(selected)
             self.history.blockSignals(False)
+        self.history_count.setText(f"{len(entries)} 条" if entries else "")
+        self.history.setVisible(bool(entries))
+        self.history.setMaximumHeight(max(56, min(len(entries), 5) * 56))
         self._show_entry(self.history.currentRow())
         self.status.setText(status)
+        self.status.setVisible(bool(status))
+        self.metric.setVisible(quota is not None)
+        if quota is not None:
+            used, daily_limit = quota
+            self.quota.setText(f"今日探索 {used}/{daily_limit} 轮")
+            self.progress.setRange(0, daily_limit)
+            self.progress.setValue(min(used, daily_limit))
+        if not entries:
+            if not available:
+                message = "探索记录暂时无法读取。"
+            elif exploring:
+                message = "新发现会记在这里。"
+            elif connected:
+                message = "去逛一会儿，我会把新发现记下来。"
+            else:
+                message = "在「Agent 连接」里添加一个连接，就能开始探索。"
+            self.empty_text.setText(message)
         self.websites_button.setEnabled(available)
         self.settings_button.setEnabled(available)
-        self.explore.setEnabled(can_start)
+        self.explore.setEnabled(connected and not exploring)
 
     def _show_entry(self, index):
-        valid = 0 <= index < len(self.entries)
-        entry = self.entries[index] if valid else None
+        entry = self.entries[index] if 0 <= index < len(self.entries) else None
+        self.pages.setCurrentIndex(0 if entry else 1)
+        self.source.setVisible(entry is not None)
         self.source.setEnabled(bool(entry and public_url(entry["url"])))
         if entry is None:
-            self.detail.setPlainText("有了发现，我会记在这里。")
-            return
-        kind = {"article": "网页正文", "metadata": "标题或简介", "transcript": "字幕或转写"}[entry["evidence_kind"]]
-        note = f'{entry["reaction"]}\n\n我看到的（{kind}）\n{entry["observation"]}'
-        if entry["next_topic"]:
-            note += f'\n\n下次想找\n{entry["next_topic"]}'
-        self.detail.setPlainText(f'{note}\n\n通过 {entry["agent_name"]} 找到')
+            self.entry_id = None
+        elif self.entry_id != entry["id"]:
+            self.entry_id = entry["id"]
+            self.detail.show_entry(entry)
 
     def _open_source(self):
         index = self.history.currentRow()
@@ -106,52 +275,59 @@ class WebsiteSettingsPanel(QDialog):
         super().__init__(parent)
         self.controller = controller
         self.setWindowTitle("探索网站")
-        self.resize(450, 360)
+        layout = themed_layout(self, 522, 451)
+        banner, _ = header("探索网站", "reading", subtitle="你选她先去哪，也可以查看她后来发现的新网站。")
+        layout.addWidget(banner)
 
-        layout = QVBoxLayout(self)
-        intro = plain_label(self)
-        intro.setText("添加几家想让大肥鱼去逛的网站。她自己发现并收藏的网站也会出现在这里。")
-        layout.addWidget(intro)
-        add_row = QHBoxLayout()
-        self.address = QLineEdit(self)
-        self.address.setPlaceholderText("域名或网址")
+        section = surface()
+        sites_layout = QVBoxLayout(section)
+        sites_layout.setContentsMargins(13, 11, 13, 12)
+        sites_layout.setSpacing(8)
+        self.address = QLineEdit()
+        self.address.setPlaceholderText("输入域名或网址")
         self.address.setAccessibleName("网站域名或网址")
         self.address.returnPressed.connect(self._add)
-        add_row.addWidget(self.address)
-        add_button = QPushButton("添加网站", self)
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.address, 1)
+        add_button = button("添加网站", "primary")
         add_button.clicked.connect(self._add)
         add_row.addWidget(add_button)
-        layout.addLayout(add_row)
-
-        self.sites = QListWidget(self)
-        self.sites.setAccessibleName("探索网站列表")
+        sites_layout.addLayout(add_row)
+        self.sites = card_list("探索网站列表")
         self.sites.currentItemChanged.connect(self._selection_changed)
-        layout.addWidget(self.sites)
-        self.info = plain_label(self)
-        layout.addWidget(self.info)
+        sites_layout.addWidget(self.sites, 1)
+        self.empty = label("添加一个网站，让大肥鱼有地方逛。", "muted", wrap=True)
+        sites_layout.addWidget(self.empty)
+        self.info = label(role="muted", wrap=True)
+        sites_layout.addWidget(self.info)
+        self.error = label(role="error", wrap=True)
+        sites_layout.addWidget(self.error)
+        layout.addWidget(section, 1)
 
         actions = QHBoxLayout()
-        self.source = QPushButton("打开发现来源", self)
+        self.source = button("打开发现来源")
         self.source.clicked.connect(self._open_source)
         actions.addWidget(self.source)
-        self.remove = QPushButton("移除", self)
+        self.remove = button("移除", "remove")
         self.remove.clicked.connect(self._remove)
         actions.addWidget(self.remove)
         actions.addStretch()
-        close_button = QPushButton("关闭", self)
+        close_button = button("关闭")
         close_button.clicked.connect(self.accept)
         actions.addWidget(close_button)
         layout.addLayout(actions)
         self.refresh()
 
-    def refresh(self):
+    def refresh(self, selected_domain=None):
         self.sites.clear()
-        for site in self.controller.diary.websites():
+        sites = self.controller.diary.websites()
+        for site in sites:
             kind = "你预设的" if site.kind == "preset" else "她自己发现的"
-            item = QListWidgetItem(f"{site.domain} · {kind}")
-            item.setData(Qt.UserRole, site)
-            self.sites.addItem(item)
-        self.sites.setCurrentRow(0)
+            add_card(self.sites, site.domain, kind, value=site)
+        self.empty.setVisible(not sites)
+        self.sites.setVisible(bool(sites))
+        selected = next((i for i, site in enumerate(sites) if site.domain == selected_domain), 0)
+        self.sites.setCurrentRow(selected)
         self._selection_changed()
 
     def _selection_changed(self):
@@ -159,17 +335,25 @@ class WebsiteSettingsPanel(QDialog):
         site = item.data(Qt.UserRole) if item else None
         self.remove.setEnabled(site is not None)
         self.source.setEnabled(bool(site and public_url(site.source_url)))
-        self.info.setText(f"她还想找「{site.topic}」。" if site and site.topic else "")
+        topic = site.topic if site else ""
+        self.info.setText(f"她还想找「{topic}」。" if topic else "")
+        self.info.setVisible(bool(topic))
+        self.error.hide()
+
+    def _show_error(self, text):
+        self.error.setText(text)
+        self.error.show()
 
     def _add(self):
         try:
-            self.controller.diary.add_website(self.address.text())
-            self.refresh()
+            address = self.address.text()
+            self.controller.diary.add_website(address)
+            self.refresh(website_domain(address))
         except ValueError as error:
-            self.info.setText(str(error))
+            self._show_error(str(error))
             return
         except sqlite3.Error:
-            self.info.setText("网站列表暂时读写不了。")
+            self._show_error("网站列表暂时读写不了。")
             return
         self.address.clear()
 
@@ -180,7 +364,7 @@ class WebsiteSettingsPanel(QDialog):
                 self.controller.remove_website(item.data(Qt.UserRole).domain)
                 self.refresh()
             except sqlite3.Error:
-                self.info.setText("网站列表暂时读写不了。")
+                self._show_error("网站列表暂时读写不了。")
 
     def _open_source(self):
         item = self.sites.currentItem()
@@ -195,46 +379,73 @@ class AgentSettingsPanel(QDialog):
         super().__init__(parent)
         self.controller = controller
         self.setWindowTitle("Agent 连接")
-        self.resize(480, 405)
+        layout = themed_layout(self, 538, 520)
+        banner, _ = header("Agent 连接", "thinking")
+        layout.addWidget(banner)
 
-        layout = QVBoxLayout(self)
-        self.agents = QListWidget(self)
-        self.agents.setAccessibleName("已配置的 Agent")
+        section = surface()
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(13, 10, 13, 11)
+        section_layout.setSpacing(7)
+        add = button("添加连接")
+        add.clicked.connect(lambda: self._edit(new=True))
+        section_layout.addLayout(heading_row("已配置的连接", add))
+        self.agents = card_list("已配置的 Agent")
         self.agents.currentItemChanged.connect(self._selection_changed)
         self.agents.itemDoubleClicked.connect(lambda _item: self._edit())
-        layout.addWidget(self.agents)
-
-        buttons = QHBoxLayout()
-        add = QPushButton("添加连接", self)
-        add.clicked.connect(lambda: self._edit(new=True))
-        buttons.addWidget(add)
-        self.edit = QPushButton("编辑", self)
+        section_layout.addWidget(self.agents, 1)
+        self.empty = label("添加一个 Agent，帮大肥鱼去找有意思的内容。", "muted", wrap=True)
+        section_layout.addWidget(self.empty)
+        edit_row = QHBoxLayout()
+        edit_row.addStretch()
+        self.edit = button("编辑")
         self.edit.clicked.connect(self._edit)
-        buttons.addWidget(self.edit)
-        self.remove = QPushButton("移除", self)
+        edit_row.addWidget(self.edit)
+        self.remove = button("移除", "remove")
         self.remove.clicked.connect(self._remove)
-        buttons.addWidget(self.remove)
-        buttons.addStretch()
-        layout.addLayout(buttons)
+        edit_row.addWidget(self.remove)
+        section_layout.addLayout(edit_row)
+        layout.addWidget(section)
 
-        form = QFormLayout()
-        self.automatic = QCheckBox("大肥鱼空闲时可以自己去逛", self)
-        self.limit = QSpinBox(self)
+        preferences = surface()
+        pref_layout = QVBoxLayout(preferences)
+        pref_layout.setContentsMargins(13, 11, 13, 11)
+        pref_layout.setSpacing(8)
+        pref_layout.addWidget(label("探索设置", "section"))
+        self.automatic = Toggle("允许她空闲时自行探索")
+        self.share = Toggle("熟悉我的节奏后，工作结束时偶尔来分享")
+        pref_layout.addWidget(self.automatic)
+        pref_layout.addWidget(self.share)
+        quota = QHBoxLayout()
+        quota.addWidget(label("每日探索上限"))
+        quota.addStretch()
+        self.limit = QSpinBox()
+        self.limit.setAccessibleName("每日探索上限")
         self.limit.setRange(1, 20)
         self.limit.setSuffix(" 轮")
-        self.share = QCheckBox("熟悉我的节奏后，忙完时偶尔来分享", self)
-        form.addRow("自动探索", self.automatic)
-        form.addRow("每日探索上限", self.limit)
-        form.addRow("工作结束", self.share)
-        layout.addLayout(form)
-        self.error = plain_label(self)
+        self.limit.setAlignment(Qt.AlignCenter)
+        self.limit.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.limit.setFixedWidth(68)
+        minus = button("−")
+        plus = button("+")
+        for control, name in ((minus, "减少每日探索上限"), (plus, "增加每日探索上限")):
+            control.setFixedWidth(34)
+            control.setAccessibleName(name)
+        minus.clicked.connect(self.limit.stepDown)
+        plus.clicked.connect(self.limit.stepUp)
+        self.limit.valueChanged.connect(lambda value: minus.setEnabled(value > self.limit.minimum()))
+        self.limit.valueChanged.connect(lambda value: plus.setEnabled(value < self.limit.maximum()))
+        quota.addWidget(minus)
+        quota.addWidget(self.limit)
+        quota.addWidget(plus)
+        pref_layout.addLayout(quota)
+        layout.addWidget(preferences)
+        layout.addStretch()
+
+        self.error = label(role="error", wrap=True)
+        self.error.hide()
         layout.addWidget(self.error)
-        actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
-        actions.button(QDialogButtonBox.Save).setText("保存探索设置")
-        actions.button(QDialogButtonBox.Cancel).setText("关闭")
-        actions.accepted.connect(self._save)
-        actions.rejected.connect(self.reject)
-        layout.addWidget(actions)
+        layout.addWidget(dialog_actions(self, "保存探索设置", "关闭"))
         settings = controller.diary.settings()
         self.automatic.setChecked(settings.automatic)
         self.limit.setValue(settings.daily_limit)
@@ -243,21 +454,23 @@ class AgentSettingsPanel(QDialog):
 
     def _refresh_agents(self):
         self.agents.clear()
-        for connection in self.controller.diary.connections():
+        connections = self.controller.diary.connections()
+        for connection in connections:
             capability = "网页" if connection.capability == "web" else "视频"
             if connection.provider == "deepseek":
                 capability = "网站探索"
-            visibility = ("可后台调用" if connection.background else "手动探索") if connection.enabled else "已暂停"
-            item = QListWidgetItem(f"{connection.name} · {capability} · {visibility}")
-            item.setData(Qt.UserRole, connection)
-            self.agents.addItem(item)
+            state = ("可后台调用" if connection.background else "手动探索") if connection.enabled else "已暂停"
+            add_card(self.agents, connection.name, f"{capability}  ·  {state}", value=connection)
         self.agents.setCurrentRow(0)
+        self.agents.setVisible(bool(connections))
+        self.agents.setMaximumHeight(max(56, min(len(connections), 3) * 56))
+        self.empty.setVisible(not connections)
         self._selection_changed()
 
     def _selection_changed(self):
-        item = self.agents.currentItem()
-        self.edit.setEnabled(item is not None)
-        self.remove.setEnabled(item is not None)
+        has_selection = self.agents.currentItem() is not None
+        self.edit.setEnabled(has_selection)
+        self.remove.setEnabled(has_selection)
 
     def _edit(self, _checked=False, *, new=False):
         item = self.agents.currentItem()
@@ -271,6 +484,7 @@ class AgentSettingsPanel(QDialog):
             connection = item.data(Qt.UserRole)
             error = self.controller.remove_connection(connection)
             self.error.setText(error)
+            self.error.setVisible(bool(error))
             if not error:
                 self._refresh_agents()
 
@@ -281,6 +495,7 @@ class AgentSettingsPanel(QDialog):
         error = self.controller.save_settings(settings)
         if error:
             self.error.setText(error)
+            self.error.show()
         else:
             self.accept()
 
@@ -290,12 +505,14 @@ class AgentConnectionDialog(QDialog):
         super().__init__(parent)
         self.controller = controller
         self.existing = existing
-        self.setWindowTitle("编辑连接" if existing else "添加连接")
-        self.resize(490, 325)
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.provider = QComboBox(self)
+        title = "编辑连接" if existing else "添加连接"
+        self.setWindowTitle(title)
+        layout = themed_layout(self, 536, 494)
+        banner, _ = header(title, "idle", art_size=52)
+        layout.addWidget(banner)
+        fields = surface()
+        form = form_layout(fields)
+        self.provider = ConnectorPicker(self)
         self.provider.addItem("OpenAI Responses · 网页搜索", "openai")
         self.provider.addItem("DeepSeek · 网站探索", "deepseek")
         self.provider.addItem("Dify Agent", "dify")
@@ -306,17 +523,16 @@ class AgentConnectionDialog(QDialog):
         self.name.setMaxLength(64)
         self.endpoint.setMaxLength(2048)
         self.model.setMaxLength(150)
-        self.capability = QComboBox(self)
+        self.capability = ConnectorPicker(self)
         self.capability.addItem("搜网页", "web")
         self.capability.addItem("找视频", "video")
         self.key = QLineEdit(self)
         self.key.setEchoMode(QLineEdit.Password)
         if existing and existing.has_key:
             self.key.setPlaceholderText("已存到钥匙串，留空可保留")
-        self.clear_key = QCheckBox("清除已保存的 API Key", self)
-        self.clear_key.setVisible(bool(existing and existing.has_key))
-        self.enabled = QCheckBox("启用这个连接", self)
-        self.background = QCheckBox("允许大肥鱼在后台自主调用", self)
+        self.clear_key = Toggle("清除已保存的 API Key")
+        self.enabled = Toggle("启用这个连接")
+        self.background = Toggle("允许大肥鱼在后台自主调用")
 
         form.addRow("接入方式", self.provider)
         form.addRow("连接名称", self.name)
@@ -324,19 +540,23 @@ class AgentConnectionDialog(QDialog):
         form.addRow("模型或 Agent 标识", self.model)
         form.addRow("能力", self.capability)
         form.addRow("API Key", self.key)
-        form.addRow("", self.clear_key)
-        form.addRow("", self.enabled)
-        form.addRow("", self.background)
-        layout.addLayout(form)
+        layout.addWidget(fields)
 
-        self.error = plain_label(self)
+        options = surface("bubble")
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(13, 9, 13, 10)
+        options_layout.setSpacing(7)
+        options_layout.addWidget(self.clear_key)
+        options_layout.addWidget(self.enabled)
+        options_layout.addWidget(self.background)
+        layout.addWidget(options)
+        layout.addStretch()
+
+        self.error = label(role="error", wrap=True)
+        self.error.hide()
         layout.addWidget(self.error)
-        actions = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, self)
-        actions.button(QDialogButtonBox.Save).setText("保存")
-        actions.button(QDialogButtonBox.Cancel).setText("取消")
-        actions.accepted.connect(self._save)
-        actions.rejected.connect(self.reject)
-        layout.addWidget(actions)
+        layout.addWidget(dialog_actions(self, "保存连接", "取消"))
+        self.key.setAccessibleName("API Key")
         self.enabled.setChecked(existing.enabled if existing else True)
         self.background.setChecked(existing.background if existing else False)
         if existing:
@@ -376,16 +596,17 @@ class AgentConnectionDialog(QDialog):
         self.model.setEnabled(not dify)
         self.model.setReadOnly(deepseek)
         self.capability.setEnabled(not (openai or deepseek))
-        self.clear_key.setEnabled(provider == "http")
+        self.clear_key.setVisible(bool(provider == "http" and self.existing and self.existing.has_key))
 
     def _save(self):
         old = self.existing
         secret = self.key.text().strip()
         endpoint = self.endpoint.text().strip()
         provider = self.provider.currentData()
-        clear = self.clear_key.isVisible() and self.clear_key.isEnabled() and self.clear_key.isChecked()
+        clear = not self.clear_key.isHidden() and self.clear_key.isEnabled() and self.clear_key.isChecked()
         if old and old.has_key and not (secret or clear) and (provider, endpoint) != (old.provider, old.endpoint):
             self.error.setText("API 地址已改变。请填写该服务的 API Key，或选择清除已保存的 Key。")
+            self.error.show()
             return
         connection = AgentConnection(
             old.id if old else uuid4().hex, self.name.text().strip(), provider, endpoint,
@@ -396,6 +617,7 @@ class AgentConnectionDialog(QDialog):
         error = self.controller.save_connection(connection, old, secret if secret else "" if clear else None)
         if error:
             self.error.setText(error)
+            self.error.show()
         else:
             self.key.clear()
             self.accept()

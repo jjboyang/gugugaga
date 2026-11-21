@@ -367,7 +367,7 @@ class ExplorationController(QObject):
             if remembered:
                 self.status = f"我记住了 {learned.domain}，改天还想去看看。"
             else:
-                self.status = problem or "我找到了一条。想看的话，点一下最新的记录。"
+                self.status = problem
         except sqlite3.Error:
             self.status = DIARY_ERROR
         if not self.closing:
@@ -412,24 +412,19 @@ class ExplorationController(QObject):
             return
         status = self.status
         entries = []
+        quota = None
         available = self.diary is not None
-        can_start = False
+        connected = False
         if available:
             try:
                 entries = self.diary.recent()
-                can_start = bool(self._available_agents()) and self.reply is None
-                if not status:
-                    if entries:
-                        status = "今天还想再看看别的。"
-                    elif can_start:
-                        status = "可以点「去逛一会儿」，陪我试一轮。"
-                    else:
-                        status = "可以先加一个 Agent，陪我试逛一轮。"
+                connected = bool(self._available_agents())
                 used = self.diary.calls_on(datetime.now().date().isoformat())
-                status += f"\n今日探索 {used}/{self.diary.settings().daily_limit} 轮"
+                quota = (used, self.diary.settings().daily_limit)
             except sqlite3.Error:
                 status = DIARY_ERROR
-        self.panel.refresh(status, entries, available=available, can_start=can_start)
+        self.panel.refresh(status, entries, available=available, connected=connected,
+                           exploring=self.reply is not None, quota=quota)
 
     def _touched(self):
         self.last_touch = time.monotonic()

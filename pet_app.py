@@ -1,12 +1,10 @@
 """Desktop Pet — main entry point."""
-import json
 import os
 import pathlib
-import subprocess
 import sys
 import signal
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication
 from pet.window import PetWindow
 from pet.animation import AnimationEngine
 from pet.exploration_controller import ExplorationController
@@ -23,101 +21,6 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
 def _dlog(*args):
     if DEBUG:
         print("[pet]", *args, file=sys.stderr, flush=True)
-
-
-def _claude_settings_path():
-    if sys.platform == "darwin":
-        base = pathlib.Path.home() / "Library" / "Application Support"
-    elif sys.platform == "win32":
-        base = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home() / "AppData" / "Roaming"))
-    else:
-        base = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config"))
-    return base / "claude" / "settings.json"
-
-
-PET_HOOKS_TEMPLATE = {
-    "UserPromptSubmit": [
-        {"command": "{notify} question"}
-    ],
-    # After each tool batch resolves, before the next model request — matches "Claude is thinking".
-    "PostToolBatch": [
-        {"command": "{notify} thinking"}
-    ],
-    "PostToolUse": [
-        {"matcher": "Read|Grep|Glob", "command": "{notify} reading"},
-        {"matcher": "Edit|Write", "command": "{notify} writing"},
-        {"matcher": "Bash", "command": "{notify} executing"},
-    ],
-    "Stop": [
-        {"command": "{notify} done"}
-    ],
-    "SessionStart": [
-        {"command": "{notify} idle"}
-    ],
-}
-
-
-def _configure_hooks():
-    settings_path = _claude_settings_path()
-    notify_script = PROJECT_ROOT / "scripts" / "notify-pet.py"
-
-    if sys.platform == "win32":
-        notify_cmd = f"python \"{notify_script}\""
-    else:
-        notify_cmd = f"\"{notify_script}\""
-
-    # Resolve template placeholders
-    pet_hooks = {}
-    for event, entries in PET_HOOKS_TEMPLATE.items():
-        pet_hooks[event] = []
-        for entry in entries:
-            resolved = {}
-            for k, v in entry.items():
-                resolved[k] = v.replace("{notify}", notify_cmd)
-            pet_hooks[event].append(resolved)
-
-    # Read existing settings
-    existing = {}
-    if settings_path.exists():
-        try:
-            existing = json.loads(settings_path.read_text("utf-8"))
-        except json.JSONDecodeError:
-            pass
-
-    # Track whether hooks already match
-    existing_hooks = existing.get("hooks", {})
-
-    changed = False
-    # Merge template entries that are still missing (e.g. new PostToolBatch after an old install).
-    merged_hooks = dict(existing_hooks)
-    for event, new_entries in pet_hooks.items():
-        existing_list = list(merged_hooks.get(event, []))
-        have = {e.get("command") for e in existing_list}
-        for entry in new_entries:
-            cmd = entry.get("command", "")
-            if cmd and cmd not in have:
-                existing_list.append(entry)
-                have.add(cmd)
-                changed = True
-        if existing_list:
-            merged_hooks[event] = existing_list
-    if changed:
-        existing["hooks"] = merged_hooks
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), "utf-8")
-
-    # Open the settings file in the default editor
-    try:
-        if sys.platform == "win32":
-            os.startfile(str(settings_path))
-        elif sys.platform == "darwin":
-            subprocess.run(["open", str(settings_path)], check=False)
-        else:
-            subprocess.run(["xdg-open", str(settings_path)], check=False)
-    except OSError:
-        pass
-
-    return changed, str(settings_path)
 
 
 def main():
@@ -221,22 +124,6 @@ def main():
 
     ipc.question_received.connect(lambda text, opts: window.show_question(text, opts))
     window.question_answered.connect(ipc.set_answer)
-
-    def on_hook_config():
-        changed, path = _configure_hooks()
-        if changed:
-            QMessageBox.information(
-                window, "Hook 已配置",
-                f"宠物 Hook 已写入:\n{path}\n\n请确认脚本路径后保存文件。\n之后重新启动 Claude Code 即可生效。"
-            )
-        else:
-            QMessageBox.information(
-                window, "Hook 已同步",
-                f"未发现需要新增的宠物 Hook 条目（或已全部存在）。\n文件:\n{path}\n\n"
-                "若你刚升级过桌宠，请确认其中包含 PostToolBatch → thinking。"
-            )
-
-    window.hook_config_requested.connect(on_hook_config)
 
     def cleanup(*args):
         ipc.stop()

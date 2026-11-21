@@ -11,7 +11,7 @@ SPRITES_DIR = os.path.join(os.path.dirname(__file__), "sprites")
 # After reading/writing with no new IPC for this long → "thinking" (between tools).
 _GAP_TO_THINKING_MS = 3000
 # After user submit ("question"), switch to thinking until the first tool signal arrives.
-# PostToolBatch also sends "thinking" between tool batches (see pet_app PET_HOOKS_TEMPLATE).
+# External phase updates can also send "thinking" between tool batches.
 _QUESTION_TO_THINKING_MS = 1200
 # After "done" animation finishes, wait this long then switch to idle.
 _DONE_TO_IDLE_MS = 3000
