@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 
 OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
 DIFY_ENDPOINT = "https://api.dify.ai/v1/chat-messages"
+DEEPSEEK_SEARCH_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
+DEEPSEEK_MODEL = "deepseek-flash"
 TOPICS = (
     "海鸥在海边是怎么找吃的", "水獭在水里做什么", "雨天的老街长什么样",
     "鸟是怎么选地方筑窝的", "窗边的光怎样影响照片", "潮水退下去能看到什么",
@@ -64,6 +66,11 @@ class AgentConnection:
         if self.provider == "openai":
             if self.endpoint != OPENAI_ENDPOINT or not self.has_key or self.capability != "web":
                 raise ValueError("OpenAI 网页探索需要 API Key。")
+        elif self.provider == "deepseek":
+            if (self.endpoint, self.capability, self.model) != (DEEPSEEK_SEARCH_ENDPOINT, "video", DEEPSEEK_MODEL):
+                raise ValueError("DeepSeek B 站探索使用内置的视频搜索配置。")
+            if not self.has_key:
+                raise ValueError("请填写 DeepSeek API Key。")
         elif self.provider in {"dify", "http"}:
             parts = read_url(self.endpoint)
             local_without_key = (self.provider == "http" and parts and parts.scheme == "http" and not self.has_key
@@ -166,7 +173,7 @@ class ExplorationDiary:
 
     def save_settings(self, settings):
         if not 1 <= settings.daily_limit <= 20:
-            raise ValueError("每日调用上限需要在 1 到 20 次之间。")
+            raise ValueError("每日探索上限需要在 1 到 20 轮之间。")
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO settings VALUES (1, ?, ?, ?)",
                             (settings.automatic, settings.daily_limit, settings.share_after_work))
@@ -190,7 +197,7 @@ class ExplorationDiary:
             self.db.execute("DELETE FROM agents WHERE id = ?", (connection_id,))
 
     def reserve(self, agent, activity, now, day, allowance):
-        """Count every paid attempt and keep one request in flight across pet instances."""
+        """Count attempted outings and keep one in flight across pet instances."""
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if self.calls_on(day) >= allowance:

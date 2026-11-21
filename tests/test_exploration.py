@@ -11,16 +11,21 @@ from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from pet.exploration import Activity, AgentConnection, DIFY_ENDPOINT, Discovery, ExplorationSettings, OPENAI_ENDPOINT
-from pet.exploration_agents import build_request, parse_result
+from pet.exploration import (
+    Activity, AgentConnection, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
+    Discovery, ExplorationSettings, OPENAI_ENDPOINT,
+)
+from pet.exploration_agents import (
+    DEEPSEEK_CHAT_ENDPOINT, build_request, parse_bilibili_reaction, parse_bilibili_search, parse_result,
+)
 from pet.exploration_controller import ExplorationController, IDLE_BEFORE_EXPLORING
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel
 from pet.window import PetWindow
@@ -41,10 +46,26 @@ VIDEO_RESULT = {
     "observation": "简介提到海鸟停在栏杆上。",
     "reaction": "这回先收藏一下。",
 }
+BILIBILI_URL = "https://www.bilibili.com/video/BV1TestFish/"
+BILIBILI_SEARCH_RESULT = {"results": [
+    {"url": "https://www.bilibili.com.example.org/video/BV1FakeFish/", "title": "其他网站"},
+    {"url": "https://www.bilibili.com/read/cv1", "title": "专栏文章"},
+    {"url": BILIBILI_URL + "?spm_id_from=fixture", "title": "海边的小鸟", "snippet": "这是观鸟记录。"},
+    {"url": BILIBILI_URL, "title": "重复结果"},
+]}
+BILIBILI_REACTION = {"choices": [{"message": {"content": json.dumps(
+    {"choice": 1, "reaction": "鲸鲸，想看看是哪种小鸟。", "next_topic": "海边常见小鸟",
+     "url": "https://www.example.org/ignored", "observation": "我看到了未证实的画面。"},
+)}}]}
 
 
 def openai_connection():
     return AgentConnection("ai", "网页 Agent", "openai", OPENAI_ENDPOINT, "gpt-5-mini", "web", True, True, True)
+
+
+def deepseek_connection():
+    return AgentConnection("ds", "B 站视频", "deepseek", DEEPSEEK_SEARCH_ENDPOINT,
+                           DEEPSEEK_MODEL, "video", True, True, True)
 
 
 class AgentProtocolTests(unittest.TestCase):
@@ -98,6 +119,26 @@ class AgentProtocolTests(unittest.TestCase):
         result = parse_result(connection, (prefix + "data: " + json.dumps(events[-1])).encode())
         self.assertEqual(result.url, VIDEO_RESULT["url"])
 
+    def test_deepseek_requires_a_real_candidate_and_preserves_search_evidence(self):
+        connection = deepseek_connection()
+        connection.validate()
+        with self.assertRaises(ValueError):
+            replace(connection, endpoint=DIFY_ENDPOINT).validate()
+        with self.assertRaises(ValueError):
+            replace(connection, has_key=False).validate()
+        request = build_request(connection, Activity("海鸟 OR site:example.org", "video", "海鸟"))
+        self.assertTrue(request["query"].endswith(" site:www.bilibili.com"))
+        self.assertEqual(request["query"].count("site:"), 1)
+        candidates = parse_bilibili_search(json.dumps(BILIBILI_SEARCH_RESULT))
+        self.assertEqual([entry["url"] for entry in candidates], [BILIBILI_URL])
+        discovery = parse_bilibili_reaction(json.dumps(BILIBILI_REACTION), candidates)
+        self.assertEqual(discovery.url, BILIBILI_URL)
+        self.assertEqual(discovery.evidence_kind, "metadata")
+        self.assertEqual(discovery.observation, "这是观鸟记录。")
+        fake_choice = {"choices": [{"message": {"content": '{"choice":99,"reaction":"鲸鲸"}'}}]}
+        with self.assertRaisesRegex(ValueError, "没有选中"):
+            parse_bilibili_reaction(json.dumps(fake_choice), candidates)
+
 
 class WorkSignals(QObject):
     active_changed = Signal(bool)
@@ -115,7 +156,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.send_header("Location", "/video")
             self.end_headers()
             return
-        result = VIDEO_RESULT if self.path == "/video" else WEB_RESULT
+        result = {
+            "/video": VIDEO_RESULT,
+            "/deepseek-search": BILIBILI_SEARCH_RESULT,
+            "/deepseek-empty": {"results": BILIBILI_SEARCH_RESULT["results"][:2]},
+            "/deepseek-chat": BILIBILI_REACTION,
+        }.get(self.path, WEB_RESULT)
         body = json.dumps(result, ensure_ascii=False).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -248,6 +294,61 @@ class ExplorationIntegrationTests(unittest.TestCase):
         edit = AgentConnectionDialog(self.controller, conn, settings)
         self.assertEqual(edit.key.text(), "")
         self.assertIn("钥匙串", edit.key.placeholderText())
+
+    def test_deepseek_key_only_connection_searches_then_selects_a_bilibili_video(self):
+        secret = "deepseek-test-key"
+        self.credentials.get.return_value = secret
+        self.controller.open_panel()
+        settings = AgentSettingsPanel(self.controller, self.controller.panel)
+        dialog = AgentConnectionDialog(self.controller, None, settings)
+        dialog.provider.setCurrentIndex(dialog.provider.findData("deepseek"))
+        dialog.key.setText(secret)
+        self.assertEqual(dialog.endpoint.text(), DEEPSEEK_SEARCH_ENDPOINT)
+        self.assertEqual(dialog.model.text(), DEEPSEEK_MODEL)
+        self.assertEqual(dialog.capability.currentData(), "video")
+        self.assertFalse(dialog.capability.isEnabled())
+        dialog._save()
+        connection, = self.controller.diary.connections()
+        self.assertEqual(connection.provider, "deepseek")
+        self.credentials.set.assert_called_once_with(connection.id, secret)
+
+        send = self.controller.network.post
+        fixture_paths = {
+            DEEPSEEK_SEARCH_ENDPOINT: "/deepseek-search",
+            DEEPSEEK_CHAT_ENDPOINT: "/deepseek-chat",
+        }
+        endpoints = []
+
+        def fixture_post(request, body):
+            endpoint = request.url().toString()
+            endpoints.append(endpoint)
+            request.setUrl(QUrl(f"http://127.0.0.1:{self.server.server_port}{fixture_paths[endpoint]}"))
+            return send(request, body)
+
+        with patch.object(self.controller.network, "post", side_effect=fixture_post):
+            self.controller.panel.explore.click()
+            self.finish_round()
+            self.assertEqual(endpoints, [DEEPSEEK_SEARCH_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT])
+            self.assertEqual(self.controller.panel.history.count(), 1)
+            entry, = self.controller.diary.recent()
+            self.assertEqual(entry["url"], BILIBILI_URL)
+            self.assertEqual(entry["reaction"], "鲸鲸，想看看是哪种小鸟。")
+            self.assertEqual(len(self.server.received), 2)
+            self.assertTrue(all(record[2] == f"Bearer {secret}" for record in self.server.received))
+            search_body = self.server.received[0][1]
+            chat_body = self.server.received[1][1]
+            self.assertTrue(search_body["query"].endswith("site:www.bilibili.com"))
+            self.assertEqual(chat_body["model"], DEEPSEEK_MODEL)
+            self.assertNotIn(secret, json.dumps(chat_body))
+            self.assertIn("今日探索 1/3 轮", self.controller.panel.status.text())
+
+            fixture_paths[DEEPSEEK_SEARCH_ENDPOINT] = "/deepseek-empty"
+            self.controller.panel.explore.click()
+            self.finish_round()
+            self.assertEqual(endpoints[2:], [DEEPSEEK_SEARCH_ENDPOINT])
+            self.assertIn("没搜到符合条件的 B 站公开视频", self.controller.status)
+            self.assertEqual(self.controller.panel.history.count(), 1)
+            self.assertIsNone(self.controller.video_candidates)
 
     def test_custom_agent_redirect_is_not_followed(self):
         connection = self.connection("redirect", "web")

@@ -13,7 +13,10 @@ from PySide6.QtCore import QObject, QTimer, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from pet.exploration import ExplorationDiary, WORK_RETURN_DAYS, choose_activity
-from pet.exploration_agents import build_request, parse_result
+from pet.exploration_agents import (
+    DEEPSEEK_CHAT_ENDPOINT, build_bilibili_reaction, build_request,
+    parse_bilibili_reaction, parse_bilibili_search, parse_result,
+)
 from pet.exploration_panel import AgentSettingsPanel, ExplorationPanel
 
 
@@ -66,6 +69,7 @@ class ExplorationController(QObject):
         self.settings_panel = None
         self.reply = None
         self.outing = None
+        self.video_candidates = None
         self.buffer = bytearray()
         self.request_key = ""
         self.request_error = ""
@@ -215,25 +219,28 @@ class ExplorationController(QObject):
             self._refresh()
             return
 
-        request = QNetworkRequest(QUrl(agent.endpoint))
+        self.outing = (outing_id, agent, automatic, activity)
+        self.request_key = key
+        self._post(agent, agent.endpoint, build_request(agent, activity))
+        self.deadline.start(REQUEST_TIMEOUT_MS)
+        self.status = f"我正在找「{activity.topic}」。"
+        self.rig.set_exploring(True)
+        self._refresh()
+
+    def _post(self, agent, endpoint, body):
+        request = QNetworkRequest(QUrl(endpoint))
         request.setRawHeader(b"Content-Type", b"application/json")
         request.setRawHeader(b"Accept", b"text/event-stream" if agent.provider == "dify" else b"application/json")
-        if key:
-            request.setRawHeader(b"Authorization", f"Bearer {key}".encode("ascii"))
+        if self.request_key:
+            request.setRawHeader(b"Authorization", f"Bearer {self.request_key}".encode("ascii"))
         request.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.ManualRedirectPolicy)
-        payload = json.dumps(build_request(agent, activity), ensure_ascii=False).encode("utf-8")
-        self.outing = (outing_id, agent, automatic)
-        self.request_key = key
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.buffer.clear()
         self.request_error = ""
         self.reply = self.network.post(request, payload)
         self.reply.setReadBufferSize(MAX_RESPONSE_BYTES + 1)
         self.reply.readyRead.connect(self._read)
         self.reply.finished.connect(self._finished)
-        self.deadline.start(REQUEST_TIMEOUT_MS)
-        self.status = f"我正在找「{activity.topic}」。"
-        self.rig.set_exploring(True)
-        self._refresh()
 
     def _read_key(self, agent):
         if not agent.has_key:
@@ -264,10 +271,7 @@ class ExplorationController(QObject):
         if self.reply is None:
             return
         reply, self.reply = self.reply, None
-        (outing_id, agent, _), self.outing = self.outing, None
-        key, self.request_key = self.request_key, ""
-        self.deadline.stop()
-        self.rig.set_exploring(False)
+        outing_id, agent, _, activity = self.outing
         status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         problem = self.request_error
         discovery = None
@@ -283,16 +287,34 @@ class ExplorationController(QObject):
                 problem = f"「{agent.name}」返回了 HTTP {status}。"
             elif reply.error() != QNetworkReply.NoError or status is None:
                 problem = f"这次没连上「{agent.name}」。"
-            else:
-                try:
-                    discovery = parse_result(agent, self.buffer)
-                    if key and any(key == value or (len(key) >= 12 and key in value)
-                                   for value in vars(discovery).values()):
-                        discovery = None
-                        problem = "这个 Agent 把凭据写进了回复。"
-                except (ValueError, RecursionError) as error:
-                    problem = str(error)
         reply.deleteLater()
+
+        if not problem:
+            try:
+                if agent.provider == "deepseek":
+                    if self.video_candidates is None:
+                        self.video_candidates = parse_bilibili_search(self.buffer)
+                        body = build_bilibili_reaction(agent, activity, self.video_candidates)
+                        self._post(agent, DEEPSEEK_CHAT_ENDPOINT, body)
+                        self.status = "我在挑一条 B 站视频。"
+                        self._refresh()
+                        return
+                    discovery = parse_bilibili_reaction(self.buffer, self.video_candidates)
+                else:
+                    discovery = parse_result(agent, self.buffer)
+                key = self.request_key
+                if key and any(key == value or (len(key) >= 12 and key in value)
+                               for value in vars(discovery).values()):
+                    discovery = None
+                    problem = "这个 Agent 把凭据写进了回复。"
+            except (ValueError, RecursionError) as error:
+                problem = str(error)
+
+        self.outing = None
+        self.video_candidates = None
+        self.request_key = ""
+        self.deadline.stop()
+        self.rig.set_exploring(False)
         self.buffer.clear()
         try:
             self.diary.finish(outing_id, discovery)
@@ -321,7 +343,7 @@ class ExplorationController(QObject):
                     else:
                         status = "可以先加一个 Agent，陪我试逛一轮。"
                 used = self.diary.calls_on(datetime.now().date().isoformat())
-                status += f"\n今日调用 {used}/{self.diary.settings().daily_limit}"
+                status += f"\n今日探索 {used}/{self.diary.settings().daily_limit} 轮"
             except sqlite3.Error:
                 status = DIARY_ERROR
         self.panel.refresh(status, entries, available=available, can_start=can_start)

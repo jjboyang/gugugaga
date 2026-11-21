@@ -11,7 +11,10 @@ from PySide6.QtWidgets import (
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
 )
 
-from pet.exploration import AgentConnection, DIFY_ENDPOINT, ExplorationSettings, OPENAI_ENDPOINT, public_url
+from pet.exploration import (
+    AgentConnection, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
+    ExplorationSettings, OPENAI_ENDPOINT, public_url,
+)
 
 
 def plain_label(parent):
@@ -124,10 +127,10 @@ class AgentSettingsPanel(QDialog):
         self.automatic = QCheckBox("大肥鱼空闲时可以自己去逛", self)
         self.limit = QSpinBox(self)
         self.limit.setRange(1, 20)
-        self.limit.setSuffix(" 次")
+        self.limit.setSuffix(" 轮")
         self.share = QCheckBox("熟悉我的节奏后，忙完时偶尔来分享", self)
         form.addRow("自动探索", self.automatic)
-        form.addRow("每日调用上限", self.limit)
+        form.addRow("每日探索上限", self.limit)
         form.addRow("工作结束", self.share)
         layout.addLayout(form)
         self.error = plain_label(self)
@@ -198,6 +201,7 @@ class AgentConnectionDialog(QDialog):
         form = QFormLayout()
         self.provider = QComboBox(self)
         self.provider.addItem("OpenAI Responses · 网页搜索", "openai")
+        self.provider.addItem("DeepSeek · B 站", "deepseek")
         self.provider.addItem("Dify Agent", "dify")
         self.provider.addItem("自定义 Agent · HTTP JSON", "http")
         self.name = QLineEdit(existing.name if existing else "网页探索", self)
@@ -248,20 +252,33 @@ class AgentConnectionDialog(QDialog):
     def _provider_changed(self):
         provider = self.provider.currentData()
         openai = provider == "openai"
+        deepseek = provider == "deepseek"
         dify = provider == "dify"
+        fixed_endpoints = {OPENAI_ENDPOINT, DEEPSEEK_SEARCH_ENDPOINT}
         if openai:
             self.endpoint.setText(OPENAI_ENDPOINT)
             self.capability.setCurrentIndex(0)
-        elif dify and self.endpoint.text() in {"", OPENAI_ENDPOINT}:
-            self.endpoint.setText(DIFY_ENDPOINT)
-        elif self.endpoint.text() == OPENAI_ENDPOINT:
+        elif deepseek:
+            self.endpoint.setText(DEEPSEEK_SEARCH_ENDPOINT)
+            self.model.setText(DEEPSEEK_MODEL)
+            self.capability.setCurrentIndex(1)
+            if self.name.text() == "网页探索":
+                self.name.setText("B 站视频")
+        elif dify:
+            if not self.endpoint.text() or self.endpoint.text() in fixed_endpoints:
+                self.endpoint.setText(DIFY_ENDPOINT)
+        elif self.endpoint.text() in fixed_endpoints | {DIFY_ENDPOINT}:
             self.endpoint.setText("")
-        elif provider == "http" and self.endpoint.text() == DIFY_ENDPOINT:
-            self.endpoint.setText("")
+        if not deepseek and self.model.isReadOnly():
+            if self.existing and self.existing.provider == provider:
+                self.model.setText(self.existing.model)
+            else:
+                self.model.setText("gpt-5-mini" if openai else "")
         self.endpoint.setPlaceholderText(DIFY_ENDPOINT if dify else "https://你的服务地址/agent/run")
-        self.endpoint.setReadOnly(openai)
+        self.endpoint.setReadOnly(openai or deepseek)
         self.model.setEnabled(not dify)
-        self.capability.setEnabled(not openai)
+        self.model.setReadOnly(deepseek)
+        self.capability.setEnabled(not (openai or deepseek))
         self.clear_key.setEnabled(provider == "http")
 
     def _save(self):
