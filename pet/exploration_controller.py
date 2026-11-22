@@ -16,7 +16,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from pet.exploration import (
-    BILIBILI_DOMAIN, Activity, AgentConnection, ExplorationDiary, ExplorationWebsite,
+    BILIBILI_DOMAIN, DAILY_LIMIT_REACHED, Activity, AgentConnection, ExplorationDiary, ExplorationWebsite,
     WORK_RETURN_DAYS, choose_activity, choose_website,
 )
 from pet.exploration_agents import (
@@ -96,6 +96,7 @@ class ExplorationController(QObject):
         self.rng = random.Random()
         self.panel = None
         self.settings_panel = None
+        self._displayed_quota_day = None
         self.reply = None
         self.media_job = None
         self.outing = None
@@ -249,7 +250,6 @@ class ExplorationController(QObject):
             matching = [agent for agent in agents if agent.capability == activity.capability]
             agent = self.rng.choice(matching)
             agent.validate()
-            self.next_outing = time.monotonic() + OUTING_INTERVAL
             website = None
             if agent.provider == "deepseek":
                 website = choose_website(self.diary.websites(), now.timestamp())
@@ -272,6 +272,7 @@ class ExplorationController(QObject):
             self._refresh()
             return
 
+        self.next_outing = time.monotonic() + OUTING_INTERVAL
         self.outing = Outing(outing_id, agent, automatic, activity, website)
         self.request_key = key
         self._post(agent.endpoint, build_request(agent, activity, website=website),
@@ -543,7 +544,7 @@ class ExplorationController(QObject):
         self.status = f"我在挑 {outing.website.domain} 上感兴趣的内容。"
         self._refresh()
 
-    def _refresh(self):
+    def _refresh(self, *, day=None):
         if self.panel is None:
             return
         status = self.status
@@ -555,8 +556,13 @@ class ExplorationController(QObject):
             try:
                 entries = self.diary.recent()
                 connected = bool(self._available_agents())
-                used = self.diary.calls_on(datetime.now().date().isoformat())
-                quota = (used, self.diary.settings().daily_limit)
+                day = day or datetime.now().date().isoformat()
+                used = self.diary.calls_on(day)
+                daily_limit = self.diary.settings().daily_limit
+                quota = (used, daily_limit)
+                self._displayed_quota_day = day
+                if status == DAILY_LIMIT_REACHED and used < daily_limit:
+                    self.status = status = ""
             except sqlite3.Error:
                 status = DIARY_ERROR
         self.panel.refresh(status, entries, available=available, connected=connected,
@@ -615,6 +621,10 @@ class ExplorationController(QObject):
             return
         now = time.monotonic()
         try:
+            if self.panel is not None and self.panel.isVisible():
+                day = datetime.now().date().isoformat()
+                if day != self._displayed_quota_day:
+                    self._refresh(day=day)
             self._maybe_share(now)
             if now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing and self.outing is None:
                 self.next_outing = now + 60

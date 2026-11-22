@@ -385,6 +385,40 @@ class ExplorationIntegrationTests(unittest.TestCase):
             panel.source.click()
         self.assertEqual(open_url.call_args.args[0].toString(), WEB_RESULT["url"])
 
+    def test_open_exploration_panel_resets_daily_quota_at_local_midnight(self):
+        controller = self.controller
+        self.assertEqual(controller.save_connection(self.connection("web", "web"), None, None), "")
+        self.assertEqual(controller.save_settings(ExplorationSettings(False, 1)), "")
+        with patch("pet.exploration_controller.datetime", wraps=datetime) as clock:
+            yesterday = datetime(2026, 11, 21, 23, 59, 58)
+            today = yesterday + timedelta(seconds=2)
+            clock.now.return_value = yesterday
+            controller.open_panel()
+            panel = controller.panel
+            panel.explore.click()
+            self.finish_round()
+            self.assertEqual(panel.quota.text(), "今日探索 1/1 轮")
+            next_outing = controller.next_outing
+            panel.explore.click()
+            self.assertIn("次数用完", panel.status.text())
+            self.assertEqual(len(self.server.received), 1)
+            self.assertEqual(controller.next_outing, next_outing)
+
+            clock.now.return_value = today
+            controller._tick()
+            self.assertEqual(panel.quota.text(), "今日探索 0/1 轮")
+            self.assertEqual(panel.progress.value(), 0)
+            self.assertFalse(panel.status.isVisible())
+            self.assertEqual(panel.history.count(), 1)
+
+            panel.explore.click()
+            self.finish_round()
+            self.assertEqual(panel.quota.text(), "今日探索 1/1 轮")
+            self.assertEqual(len(self.server.received), 2)
+            self.assertEqual(controller.diary.calls_on(yesterday.date().isoformat()), 1)
+            self.assertEqual(controller.diary.calls_on(today.date().isoformat()), 1)
+            self.assertEqual(panel.history.count(), 2)
+
     def test_desktop_menu_omits_hook_configuration_for_both_characters(self):
         for character in ("dafeiyu", "penguin"):
             with self.subTest(character=character):

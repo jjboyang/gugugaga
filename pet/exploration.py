@@ -23,6 +23,7 @@ TOPICS = (
 )
 WORK_RETURN_DAYS = 3
 PENDING_OUTING_SECONDS = 260
+DAILY_LIMIT_REACHED = "今天的探索次数用完啦。"
 
 
 def read_url(value):
@@ -311,7 +312,7 @@ class ExplorationDiary:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             if self.calls_on(day) >= allowance:
-                raise ValueError("今天的探索次数用完啦。")
+                raise ValueError(DAILY_LIMIT_REACHED)
             if self.db.execute(
                 "SELECT 1 FROM outings WHERE state = 'pending' AND started > ? LIMIT 1",
                 (now - PENDING_OUTING_SECONDS,),
