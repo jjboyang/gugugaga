@@ -396,6 +396,9 @@ class PetWindow(QWidget):
                 pos = event.position().toPoint()
                 x, y = pos.x() / self.width(), pos.y() / self.height()
                 if self._character == "dafeiyu":
+                    popup = self._speech_popup
+                    if popup is not None and popup.answer_on_pet_tap and popup.accept_answer():
+                        return
                     if self.snack_offered and self.at_mouth(pos):
                         self.snack_given.emit(pos)
                         return
@@ -442,14 +445,26 @@ class PetWindow(QWidget):
     def say(self, text, mood, *, hold_ms=None):
         return self._show_speech_bubble(Reply(text, mood), hold_ms=hold_ms)
 
-    def _show_speech_bubble(self, reply, *, answer="", hold_ms=None):
+    def ask_to_share_exploration(self, on_reply, hold_ms):
+        return self._show_speech_bubble(
+            Reply("在吗？", "whale"), answer="在呀", hold_ms=hold_ms,
+            on_answer=on_reply, answer_on_pet_tap=True,
+        )
+
+    def share_exploration_note(self, text, open_note):
+        return self._show_speech_bubble(
+            Reply(text, "whale"), answer="看看", hold_ms=9000, on_answer=open_note,
+        )
+
+    def _show_speech_bubble(self, reply, *, answer="", hold_ms=None, on_answer=None, answer_on_pet_tap=False):
         """Replace the previous reply without an old timer hiding the new one."""
         self._dismiss_speech_bubble()
         if isinstance(reply, str):
             reply = Reply(reply, "bubbles")
-        popup = SpeechBubble(reply, self._character, self._pet_size, self, answer=answer, hold_ms=hold_ms)
+        popup = SpeechBubble(reply, self._character, self._pet_size, self, answer=answer, hold_ms=hold_ms,
+                             answer_accessible_name=answer if on_answer else "", answer_on_pet_tap=answer_on_pet_tap)
         if answer:
-            popup.answered.connect(self.joke_answered)
+            popup.answered.connect(on_answer if on_answer is not None else self.joke_answered)
         self._speech_popup = popup
         popup.dismissed.connect(lambda: self._speech_dismissed(popup))
         self._position_speech_bubble()

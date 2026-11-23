@@ -37,7 +37,8 @@ class SpeechBubble(QWidget):
     answered = Signal()
     HOLD_MS = 2400
 
-    def __init__(self, reply, character="dafeiyu", pet_size=140, parent=None, *, answer="", hold_ms=None):
+    def __init__(self, reply, character="dafeiyu", pet_size=140, parent=None, *, answer="", hold_ms=None,
+                 answer_accessible_name="", answer_on_pet_tap=False):
         flags = (Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                  | Qt.WindowDoesNotAcceptFocus)
         if not answer:
@@ -51,6 +52,7 @@ class SpeechBubble(QWidget):
         self.tail_x = 0.0
         self._progress = 0.0
         self._closing = False
+        self.answer_on_pet_tap = answer_on_pet_tap
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, not bool(answer))
@@ -67,7 +69,7 @@ class SpeechBubble(QWidget):
         self.answer_button = None
         if answer:
             button = QPushButton(answer, self)
-            button.setAccessibleName("接梗：" + answer)
+            button.setAccessibleName(answer_accessible_name or "接梗：" + answer)
             button.setCursor(Qt.PointingHandCursor)
             button.setFocusPolicy(Qt.NoFocus)
             button.setFont(self._font)
@@ -77,7 +79,7 @@ class SpeechBubble(QWidget):
                 QPushButton:hover {background:#d1e8ff;}
             """)
             button.adjustSize()
-            button.clicked.connect(self._answer)
+            button.clicked.connect(self.accept_answer)
             self.setFixedWidth(self.width() + button.width() + 4)
             self.answer_button = button
         self.tail_x = self.width() / 2
@@ -98,11 +100,13 @@ class SpeechBubble(QWidget):
         self._animation.start()
         self._hold_timer.start(self.hold_ms)
 
-    def _answer(self):
-        if self.isVisible() and self.answer_button.isEnabled():
-            self.answer_button.setEnabled(False)
-            self.answered.emit()
-            self.close()
+    def accept_answer(self):
+        if self._closing or not self.isVisible() or not self.answer_button or not self.answer_button.isEnabled():
+            return False
+        self.answer_button.setEnabled(False)
+        self.close()
+        self.answered.emit()
+        return True
 
     def _set_progress(self, value):
         self._progress = float(value)

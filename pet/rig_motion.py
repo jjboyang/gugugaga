@@ -67,7 +67,7 @@ _FACE_DEFAULTS = {
     "knock_blend": 0.0, "hop_blend": 0.0,
     "knock_impact": 0.0, "anger_action": 0.0,
 }
-_IDLE_ACTIONS = frozenset(("walk", "knock", "hop"))
+_IDLE_ACTIONS = frozenset(("walk", "knock", "hop", "wave"))
 
 
 def _clamp(value, low, high):
@@ -357,7 +357,7 @@ class RigMotion:
             nodes["leg_left"].angle = 4.0 * wave(1.6)
             nodes["leg_right"].angle = -4.0 * wave(1.6)
 
-        if phase == "idle" and action in {"knock", "hop"}:
+        if phase == "idle" and action in {"knock", "hop", "wave"}:
             self._idle_targets(nodes, face, action, elapsed, duration, motion)
 
         # Hair follows the *actual* head angle through slower springs rather
@@ -385,7 +385,7 @@ class RigMotion:
         """Layer a complete, bounded action over breathing without moving a window."""
         progress = _clamp(elapsed / duration, 0.0, 1.0)
         envelope = _smoothstep(elapsed / 0.18) * _smoothstep((duration - elapsed) / 0.28)
-        face[action + "_blend"] = envelope
+        face["hop_blend" if action == "wave" else action + "_blend"] = envelope
         root, body, head = nodes["root"], nodes["body"], nodes["head"]
         left, right = nodes["arm_left"], nodes["arm_right"]
 
@@ -393,7 +393,12 @@ class RigMotion:
             current = getattr(node, attribute)
             setattr(node, attribute, current + (value - current) * envelope)
 
-        if action == "knock":
+        if action == "wave":
+            swing = math.sin(elapsed * math.tau * 1.7) * motion
+            mix(head, "angle", (-1.1 + 0.6 * swing) * motion)
+            mix(right, "angle", -4.0 * motion + 8.0 * swing)
+            mix(right, "dy", -3.0 * motion + 2.0 * swing)
+        elif action == "knock":
             # Three deliberate forward taps, separated enough to read at the
             # default 140px size. The renderer can also use this pulse for a
             # contact ripple on the screen-facing hand.

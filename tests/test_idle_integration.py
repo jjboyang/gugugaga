@@ -105,6 +105,22 @@ class IdleIntegrationTests(unittest.TestCase):
         self.assertNotEqual(self.window.pos(), origin)
         return origin
 
+    def test_exploration_invitation_animates_beside_its_own_bubble_and_stops_on_dismiss(self):
+        origin = self.window.pos()
+        self.engine.set_state("sleep")
+        for action in ("wave", "knock"):
+            with self.subTest(action=action):
+                prompt = self.window.ask_to_share_exploration(lambda: None, 8000)
+                self.rig.start_exploration_gesture(action, prompt)
+                self.paint(0.75)
+                self.assertEqual(self.last_pose.idle_action, action)
+                self.assertEqual(self.window.pos(), origin)
+                self.assertEqual(self.engine.current_phase, "sleep")
+                prompt.close()
+                self.paint(0.15)
+                self.assertEqual(self.last_pose.idle_action, "")
+                self.assertEqual(self.last_pose.phase, "sleep")
+
     def test_nearby_walk_visits_both_sides_and_returns_to_its_origin(self):
         origin = self.window.pos()
         cue = self.rig.idle_behavior.force_action("walk")

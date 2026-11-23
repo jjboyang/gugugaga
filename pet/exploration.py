@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from ipaddress import ip_address
 from pathlib import Path
 import re
@@ -21,7 +20,6 @@ TOPICS = (
     "海鸥在海边是怎么找吃的", "水獭在水里做什么", "雨天的老街长什么样",
     "鸟是怎么选地方筑窝的", "窗边的光怎样影响照片", "潮水退下去能看到什么",
 )
-WORK_RETURN_DAYS = 3
 PENDING_OUTING_SECONDS = 260
 DAILY_LIMIT_REACHED = "今天的探索次数用完啦。"
 
@@ -175,7 +173,7 @@ class Activity:
 class ExplorationSettings:
     automatic: bool = False
     daily_limit: int = 3
-    share_after_work: bool = True
+    invite_to_share: bool = True
 
 
 def choose_activity(history, capabilities, rng):
@@ -240,8 +238,9 @@ class ExplorationDiary:
                     topic TEXT NOT NULL DEFAULT '', last_visited REAL NOT NULL DEFAULT 0
                 );
                 INSERT OR IGNORE INTO exploration_websites (domain, kind) VALUES ('bilibili.com', 'preset');
-                CREATE TABLE IF NOT EXISTS work_returns (local_day TEXT PRIMARY KEY);
-                CREATE TABLE IF NOT EXISTS work_shares (local_day TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS exploration_invitations (
+                    local_day TEXT PRIMARY KEY, attempts INTEGER NOT NULL
+                );
             """)
         except sqlite3.Error:
             self.db.close()
@@ -251,6 +250,7 @@ class ExplorationDiary:
         self.db.close()
 
     def settings(self):
+        # Keep the existing column so the user's sharing preference survives an upgrade.
         row = self.db.execute("SELECT automatic, daily_limit, share_after_work FROM settings").fetchone()
         return ExplorationSettings(bool(row[0]), row[1], bool(row[2])) if row else ExplorationSettings()
 
@@ -259,7 +259,7 @@ class ExplorationDiary:
             raise ValueError("每日探索上限需要在 1 到 20 轮之间。")
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO settings VALUES (1, ?, ?, ?)",
-                            (settings.automatic, settings.daily_limit, settings.share_after_work))
+                            (settings.automatic, settings.daily_limit, settings.invite_to_share))
 
     def connections(self):
         return [AgentConnection(**dict(row)) for row in self.db.execute("SELECT * FROM agents ORDER BY rowid")]
@@ -378,22 +378,19 @@ class ExplorationDiary:
             "SELECT * FROM outings WHERE state = 'done' AND shared = 0 ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
-    def mark_shared(self, outing_id, work_day=None):
+    def mark_shared(self, outing_id):
         with self.db:
-            if work_day and not self.db.execute(
-                "INSERT OR IGNORE INTO work_shares VALUES (?)", (work_day,)
+            if not self.db.execute(
+                "UPDATE outings SET shared = 1 WHERE id = ? AND state = 'done' AND shared = 0", (outing_id,)
             ).rowcount:
                 return False
-            self.db.execute("UPDATE outings SET shared = 1 WHERE id <= ? AND state = 'done'", (outing_id,))
-        return True
+            self.db.execute("UPDATE outings SET shared = 1 WHERE id < ? AND state = 'done' AND shared = 0",
+                            (outing_id,))
+            return True
 
-    def remember_work_return(self, day):
+    def reserve_invitation(self, day, limit):
         with self.db:
-            self.db.execute("INSERT OR IGNORE INTO work_returns VALUES (?)", (day,))
-
-    def work_return_days(self, now: datetime):
-        start = (now.date() - timedelta(days=13)).isoformat()
-        return self.db.execute(
-            "SELECT count(*) FROM work_returns WHERE local_day BETWEEN ? AND ?",
-            (start, now.date().isoformat()),
-        ).fetchone()[0]
+            return bool(self.db.execute("""
+                INSERT INTO exploration_invitations (local_day, attempts) VALUES (?, 1)
+                ON CONFLICT (local_day) DO UPDATE SET attempts = attempts + 1 WHERE attempts < ?
+                """, (day, limit)).rowcount)

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
 from pet.companion import CallWalk, FaceReaction
-from pet.idle_behavior import IdleBehavior
+from pet.idle_behavior import IdleBehavior, IdleCue
 from pet.attention_renderer import AttentionRenderer
 from pet.pomodoro_renderer import PomodoroRenderer
 from pet.social_gestures import SocialGestures
@@ -415,6 +415,7 @@ class RigAnimator(QObject):
         self._work_elapsed = 0.0
         self._exploring = False
         self._exploration_elapsed = 0.0
+        self._exploration_gesture = None
         self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
         self._pomodoro_frame = None
@@ -481,11 +482,30 @@ class RigAnimator(QObject):
         self._exploring = active
         self._exploration_elapsed = 0.0
 
-    def can_show_exploration(self):
+    def can_show_exploration(self, *, allowed_speech=None):
         return (self.enabled and self.engine.current_phase in {"idle", "sleep"}
-                and not (self.call or self.face.kind or self.social.kind or self._idle_blocked()))
+                and not (self.call or self.face.kind or self.social.kind
+                         or self._idle_blocked(allowed_speech=allowed_speech)))
+
+    def start_exploration_gesture(self, action, prompt):
+        self.notify_user_activity()
+        self._exploration_gesture = (action, prompt, 0.0)
+
+    def _advance_exploration_gesture(self, elapsed):
+        if self._exploration_gesture is None:
+            return None
+        action, prompt, age = self._exploration_gesture
+        age += elapsed
+        duration = 3.2
+        if (age >= duration or self.window._speech_popup is not prompt
+                or not self.can_show_exploration(allowed_speech=prompt)):
+            self._exploration_gesture = None
+            return None
+        self._exploration_gesture = (action, prompt, age)
+        return IdleCue(action=action, elapsed=age, duration=duration)
 
     def cancel_interaction(self):
+        self._exploration_gesture = None
         self.social.clear()
         self.call = None
         self.face.clear()
@@ -514,6 +534,7 @@ class RigAnimator(QObject):
 
     def notify_user_activity(self):
         """Freeze any local walk at its current position before handling input."""
+        self._exploration_gesture = None
         self.call = None
         self.idle_behavior.notify_activity()
         self.motion.cancel_idle_actions()
@@ -570,6 +591,7 @@ class RigAnimator(QObject):
             self.frame_changed.emit(self._pomodoro_frame)
             return
         phase = "dragged" if dragging else "idle" if work or pomodoro or interacting or exploring else self.engine.current_phase or "idle"
+        gesture = self._advance_exploration_gesture(elapsed)
         if self.call:
             cue = self.call.advance(elapsed, self.window, cursor)
             if self.call.finished:
@@ -577,6 +599,8 @@ class RigAnimator(QObject):
                     self.window.say("干嘛", "bubbles")
                 self.call = None
                 self.idle_behavior.notify_activity()
+        elif gesture:
+            phase, cue = "idle", gesture
         else:
             blocked = interacting or exploring or self._idle_blocked()
             room = self._walk_room() if phase == "idle" and not blocked else None
@@ -642,7 +666,7 @@ class RigAnimator(QObject):
             pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
         self.frame_changed.emit(pixmap)
 
-    def _idle_blocked(self):
+    def _idle_blocked(self, *, allowed_speech=None):
         if self.work_mode or self.pomodoro_mode != "idle":
             return True
         if not self.window.isVisible() or getattr(self.window, "_left_down", False):
@@ -653,7 +677,7 @@ class RigAnimator(QObject):
         for name in ("_speech_popup", "_question_popup", "_settings_popup"):
             popup = getattr(self.window, name, None)
             try:
-                if popup is not None and popup.isVisible():
+                if popup is not None and popup is not allowed_speech and popup.isVisible():
                     return True
             except RuntimeError:
                 pass  # A closed Qt popup may already have been destroyed.

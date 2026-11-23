@@ -19,7 +19,7 @@ from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -31,7 +31,7 @@ from pet.exploration_agents import (
     DEEPSEEK_ASR_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, parse_result,
     parse_website_reaction, parse_website_search, website_links,
 )
-from pet.exploration_controller import ExplorationController, IDLE_BEFORE_EXPLORING
+from pet.exploration_controller import DAILY_INVITATION_LIMIT, ExplorationController, IDLE_BEFORE_EXPLORING
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
 from pet.exploration_pictures import PictureCandidate, collect_pictures
 from pet.exploration_video import AudioSample, TimedText, VideoMaterial, _audio, _frames, _parse_captions, playback_url, video_page
@@ -251,10 +251,6 @@ class AgentProtocolTests(unittest.TestCase):
             parse_website_reaction(json.dumps(fake_choice), candidates, links, activity)
 
 
-class WorkSignals(QObject):
-    active_changed = Signal(bool)
-
-
 class AgentHandler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
@@ -328,9 +324,8 @@ class ExplorationIntegrationTests(unittest.TestCase):
     def make_pet(self):
         self.window = PetWindow()
         self.rig = Mock()
-        self.work = WorkSignals()
         self.controller = ExplorationController(
-            self.window, self.rig, self.work, is_active=lambda: True,
+            self.window, self.rig, is_active=lambda: True,
             diary_path=self.path, credentials=self.credentials,
         )
         self.addCleanup(self.close_pet, self.controller, self.window)
@@ -470,32 +465,66 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertIn("次数用完", self.controller.status)
         self.assertEqual(len(self.server.received), 2)
 
-    def test_work_end_sharing_uses_distinct_days_and_waits_for_the_pet(self):
-        diary = self.controller.diary
-        today = datetime.now()
-        for offset in (1, 1, 2):
-            diary.remember_work_return((today.date() - timedelta(days=offset)).isoformat())
-        self.assertEqual(diary.work_return_days(today), 2)
-        self.work.active_changed.emit(False)
-        self.assertIsNone(self.controller.share_window)
-        self.window.pet_tapped.emit()
-        self.assertEqual(diary.work_return_days(today), 3)
-
-        self.window.say = Mock()
+    def test_ignored_invitation_retries_later_and_a_click_shares_the_note(self):
+        controller = self.controller
+        diary = controller.diary
+        date = datetime.now()
+        day = date.date().isoformat()
+        activity = Activity("海鸟", "web", "海鸟")
         agent = self.connection("web", "web")
-        outing_id = diary.reserve(agent, Activity("海鸟", "web", "海鸟"), today.timestamp(),
-                                  today.date().isoformat(), 3)
+        outing_id = diary.reserve(agent, activity, date.timestamp(), day, 3)
         diary.finish(outing_id, Discovery(**WEB_RESULT))
-        self.work.active_changed.emit(True)
-        self.work.active_changed.emit(False)
+        self.window.show()
+        now = time.monotonic()
+        controller._maybe_invite(now, day)
+        self.assertIsNone(controller.invitation)
+        self.assertGreater(controller.next_invitation, now)
+
         self.rig.can_show_exploration.return_value = False
-        earliest, _, _ = self.controller.share_window
-        self.controller._maybe_share(earliest + 1)
-        self.window.say.assert_not_called()
+        controller._maybe_invite(controller.next_invitation, day)
+        self.assertIsNone(controller.invitation)
         self.rig.can_show_exploration.return_value = True
-        self.controller._maybe_share(earliest + 2)
-        self.window.say.assert_called_once()
+        choice = Mock(side_effect=("knock", "wave"))
+        with patch.object(controller.rng, "choice", choice):
+            controller._maybe_invite(controller.next_invitation, day)
+            prompt = controller.invitation
+            self.assertEqual(prompt.reply.text, "在吗？")
+            self.rig.start_exploration_gesture.assert_called_with("knock", prompt)
+            prompt.fade_out()
+            self.assertFalse(prompt.accept_answer())
+            QTest.qWait(250)
+            self.assertIsNone(controller.invitation)
+            self.assertEqual(diary.latest_unshared()["id"], outing_id)
+            QTest.mouseClick(self.window, Qt.LeftButton, pos=self.window.rect().center())
+            self.assertIsNone(self.window._speech_popup)
+
+            controller._maybe_invite(controller.next_invitation - 1, day)
+            self.assertIsNone(controller.invitation)
+            controller._maybe_invite(controller.next_invitation, day)
+            self.rig.start_exploration_gesture.assert_called_with("wave", controller.invitation)
+            QTest.mouseClick(self.window, Qt.LeftButton, pos=self.window.rect().center())
+
+        self.assertIsNone(controller.invitation)
         self.assertIsNone(diary.latest_unshared())
+        share = self.window._speech_popup
+        self.assertIn("我想看看", share.reply.text)
+        self.assertEqual(share.answer_button.text(), "看看")
+        newer = diary.reserve(agent, activity, date.timestamp() + 1, day, 3)
+        diary.finish(newer, replace(Discovery(**WEB_RESULT), title="更新的探索记录"))
+        QTest.mouseClick(share.answer_button, Qt.LeftButton)
+        self.assertEqual(controller.panel.entry_id, outing_id)
+
+    def test_invitation_limit_survives_restart_and_resets_on_a_new_local_day(self):
+        day = "2026-11-23"
+        for _ in range(DAILY_INVITATION_LIMIT):
+            self.assertTrue(self.controller.diary.reserve_invitation(day, DAILY_INVITATION_LIMIT))
+        self.assertEqual(self.controller.save_settings(ExplorationSettings(invite_to_share=False)), "")
+        self.close_pet(self.controller, self.window)
+        self.make_pet()
+        diary = self.controller.diary
+        self.assertFalse(diary.settings().invite_to_share)
+        self.assertFalse(diary.reserve_invitation(day, DAILY_INVITATION_LIMIT))
+        self.assertTrue(diary.reserve_invitation("2026-11-24", DAILY_INVITATION_LIMIT))
 
     def test_authentication_is_stored_only_in_credentials(self):
         secret = "example-test-secret"

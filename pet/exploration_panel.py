@@ -511,7 +511,7 @@ class AgentSettingsPanel(QDialog):
         pref_layout.setSpacing(8)
         pref_layout.addWidget(label("探索设置", "section"))
         self.automatic = Toggle("允许她空闲时自行探索")
-        self.share = Toggle("熟悉我的节奏后，工作结束时偶尔来分享")
+        self.share = Toggle("有新发现时，偶尔来问我在不在")
         pref_layout.addWidget(self.automatic)
         pref_layout.addWidget(self.share)
         quota = QHBoxLayout()
@@ -547,7 +547,7 @@ class AgentSettingsPanel(QDialog):
         settings = controller.diary.settings()
         self.automatic.setChecked(settings.automatic)
         self.limit.setValue(settings.daily_limit)
-        self.share.setChecked(settings.share_after_work)
+        self.share.setChecked(settings.invite_to_share)
         self._refresh_agents()
 
     def _refresh_agents(self):

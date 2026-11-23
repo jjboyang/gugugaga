@@ -103,7 +103,7 @@ class AttentionRenderer:
             return awake
 
         action = getattr(pose, "idle_action", "")
-        if action == "hop":
+        if action in {"hop", "wave"}:
             return self._mix(awake, self.hop_frame, getattr(pose, "hop_blend", 0.0))
         if action == "knock":
             self._load_knock()

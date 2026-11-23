@@ -27,9 +27,9 @@ class AttentionRenderingTests(unittest.TestCase):
     def test_gesture_artwork_is_visible_without_replacing_normal_idle(self):
         renderer = self.renderer
         self.assertEqual(renderer.render(RigPose()).toImage(), renderer.base_pixmap.toImage())
-        for action in ("walk", "knock", "hop"):
+        for action in ("walk", "knock", "hop", "wave"):
             pose = RigPose(idle_action=action, action_elapsed=1)
-            setattr(pose, action + "_blend", 1)
+            setattr(pose, "hop_blend" if action == "wave" else action + "_blend", 1)
             with self.subTest(action=action):
                 self.assertNotEqual(renderer.render(pose).toImage(), renderer.base_pixmap.toImage())
 
@@ -63,7 +63,7 @@ class AttentionRenderingTests(unittest.TestCase):
         self.assertEqual(self.renderer.render(pose).toImage(), expected.toImage())
 
     def test_all_attention_actions_keep_a_clear_canvas_border(self):
-        for action in ("walk", "knock", "hop"):
+        for action in ("walk", "knock", "hop", "wave"):
             motion = RigMotion()
             for frame in range(145):
                 pose = motion.step(1 / 30, "idle", idle_action=action,

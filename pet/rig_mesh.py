@@ -253,6 +253,13 @@ class OriginalMeshRenderer:
         idle_action = pose.idle_action if pose is not None and pose.phase == "idle" else ""
         if idle_action == "walk" and pose.walk_blend:
             self._skin_walk(vertices, pose)
+        if idle_action == "wave":
+            # The atlas's raised hand lies above the standing shoulder weights.
+            swing = pose.nodes.get("arm_right", NodePose()).angle * pose.hop_blend
+            for original, point in zip(self.vertices, vertices):
+                weight = _gaussian(original.x(), original.y(), 368.0, 323.0, 24.0, 26.0)
+                point.setX(point.x() + swing * weight)
+                point.setY(point.y() - swing * 0.45 * weight)
         if idle_action == "knock":
             # The forward fist sits in front of the face, above the ordinary
             # shoulder weights. Deform that small connected mesh region so a

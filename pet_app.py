@@ -82,7 +82,7 @@ def main():
     app.aboutToQuit.connect(pomodoro.shutdown)
     work = WorkMode(window, rig)
     exploration = ExplorationController(
-        window, rig, work, is_active=lambda: selected_character[0] == "dafeiyu",
+        window, rig, is_active=lambda: selected_character[0] == "dafeiyu",
     )
     app.aboutToQuit.connect(exploration.shutdown)
     app.aboutToQuit.connect(work.stop)

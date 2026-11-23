@@ -17,7 +17,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 
 from pet.exploration import (
     BILIBILI_DOMAIN, DAILY_LIMIT_REACHED, Activity, AgentConnection, ExplorationDiary, ExplorationWebsite,
-    WORK_RETURN_DAYS, choose_activity, choose_website,
+    choose_activity, choose_website,
 )
 from pet.exploration_agents import (
     DEEPSEEK_ASR_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_audio_request,
@@ -31,6 +31,10 @@ from pet.exploration_video import AudioSample, TimedText, VIDEO_TIMEOUT, VideoMa
 
 IDLE_BEFORE_EXPLORING = 10 * 60
 OUTING_INTERVAL = 15 * 60
+INVITATION_INTERVAL = (15 * 60, 45 * 60)
+INVITATION_QUIET_SECONDS = 30
+INVITATION_HOLD_MS = 8000
+DAILY_INVITATION_LIMIT = 3
 REQUEST_TIMEOUT_MS = 40_000
 SITE_SEARCH_TIMEOUT_MS = 12_000
 FETCH_TIMEOUT_MS = 8_000
@@ -87,7 +91,7 @@ class SystemCredentials:
 
 
 class ExplorationController(QObject):
-    def __init__(self, window, rig, work, *, is_active, diary_path=None, credentials=None):
+    def __init__(self, window, rig, *, is_active, diary_path=None, credentials=None):
         super().__init__(window)
         self.window = window
         self.rig = rig
@@ -106,8 +110,9 @@ class ExplorationController(QObject):
         self.status = ""
         self.last_touch = time.monotonic()
         self.next_outing = 0.0
-        self.work_ended = None
-        self.share_window = None
+        self.invitation = None
+        self.invitation_day = None
+        self.next_invitation = 0.0
         self.closing = False
         path = diary_path if diary_path is not None else Path(os.environ.get(
             "DESKTOP_PET_EXPLORATION_PATH", str(Path.home() / ".desktop-pet" / "exploration.sqlite3"),
@@ -127,9 +132,7 @@ class ExplorationController(QObject):
         self.media_timer.timeout.connect(self._check_media)
         window.exploration_requested.connect(self.open_panel)
         window.interaction_started.connect(self._touched)
-        window.pet_tapped.connect(self._on_pet_tapped)
-        window.face_tapped.connect(self._on_face_tapped)
-        work.active_changed.connect(self._on_work_changed)
+        window.drag_started.connect(self._cancel_invitation)
 
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -137,12 +140,18 @@ class ExplorationController(QObject):
         if self.diary is not None:
             self.timer.start()
 
-    def open_panel(self):
+    def open_panel(self, *, entry_id=None):
         if not self.is_active():
             return
+        self._cancel_invitation()
         if self.panel is None:
             self.panel = ExplorationPanel(self)
         self._refresh()
+        if entry_id is not None:
+            for index, entry in enumerate(self.panel.entries):
+                if entry["id"] == entry_id:
+                    self.panel.history.setCurrentRow(index)
+                    break
         self.panel.show()
         self.panel.raise_()
         self.panel.activateWindow()
@@ -182,6 +191,8 @@ class ExplorationController(QObject):
             return DIARY_ERROR
         if not settings.automatic and self.outing and self.outing.automatic:
             self._cancel("已暂停自动探索。")
+        if not settings.invite_to_share:
+            self._cancel_invitation()
         self.status = ""
         self._refresh()
         return ""
@@ -571,62 +582,57 @@ class ExplorationController(QObject):
     def _touched(self):
         self.last_touch = time.monotonic()
 
-    def _on_work_changed(self, active):
-        if active:
-            self.work_ended = self.share_window = None
-        elif self.is_active() and self.diary is not None:
-            self.work_ended = time.monotonic()
-            try:
-                if (self.diary.settings().share_after_work
-                        and self.diary.work_return_days(datetime.now()) >= WORK_RETURN_DAYS):
-                    self.share_window = (self.work_ended + 3, self.work_ended + 60, True)
-            except sqlite3.Error:
-                self.status = DIARY_ERROR
-
-    def _on_face_tapped(self, region, _side):
-        # Head taps also emit pet_tapped, so only the cheek path needs this hook.
-        if region == "cheek":
-            self._on_pet_tapped()
-
-    def _on_pet_tapped(self):
+    def _accept_invitation(self, entry):
         if not self.is_active() or self.diary is None:
             return
-        now = time.monotonic()
-        if self.work_ended is not None and now - self.work_ended <= 5 * 60:
-            try:
-                self.diary.remember_work_return(datetime.now().date().isoformat())
-                self.work_ended = None
-            except sqlite3.Error:
-                self.status = DIARY_ERROR
-        self.share_window = (now + 0.5, now + 7, False)
+        self._touched()
+        try:
+            if self.diary.mark_shared(entry["id"]):
+                reaction = entry["reaction"]
+                teaser = reaction if len(reaction) <= 18 else reaction[:17] + "…"
+                self.window.share_exploration_note(teaser, lambda: self.open_panel(entry_id=entry["id"]))
+        except sqlite3.Error:
+            self.status = DIARY_ERROR
+            self._refresh()
 
-    def _maybe_share(self, now):
-        if self.share_window is None:
+    def _cancel_invitation(self):
+        if self.invitation is not None:
+            self.invitation.close()
+
+    def _maybe_invite(self, now, day):
+        if day != self.invitation_day:
+            self.invitation_day = day
+            self.next_invitation = now + self.rng.uniform(*INVITATION_INTERVAL)
+        if now < self.next_invitation or self.invitation is not None:
             return
-        earliest, latest, after_work = self.share_window
-        if now > latest:
-            self.share_window = None
-        elif now >= earliest and self.rig.can_show_exploration() and not (self.panel and self.panel.isVisible()):
-            self.share_window = None
-            entry = self.diary.latest_unshared()
-            work_day = datetime.now().date().isoformat() if after_work else None
-            if entry and self.diary.mark_shared(entry["id"], work_day):
-                teaser = entry["reaction"]
-                if len(teaser) > 18:
-                    teaser = teaser[:17] + "…"
-                self.window.say(teaser, "whale", hold_ms=3600)
+        self.next_invitation = now + self.rng.uniform(*INVITATION_INTERVAL)
+        if (self.outing is not None or now - self.last_touch < INVITATION_QUIET_SECONDS
+                or (self.panel is not None and self.panel.isVisible())
+                or not self.rig.can_show_exploration() or not self.diary.settings().invite_to_share):
+            return
+        entry = self.diary.latest_unshared()
+        if entry is None:
+            return
+        if not self.diary.reserve_invitation(day, DAILY_INVITATION_LIMIT):
+            self.next_invitation = float("inf")
+            return
+        prompt = self.window.ask_to_share_exploration(lambda: self._accept_invitation(entry), INVITATION_HOLD_MS)
+        self.invitation = prompt
+        prompt.dismissed.connect(lambda: setattr(self, "invitation", None))
+        self.rig.start_exploration_gesture(self.rng.choice(("wave", "knock")), prompt)
 
     def _tick(self):
         if not self.is_active() or self.diary is None:
+            self._cancel_invitation()
             return
         now = time.monotonic()
         try:
-            if self.panel is not None and self.panel.isVisible():
-                day = datetime.now().date().isoformat()
-                if day != self._displayed_quota_day:
-                    self._refresh(day=day)
-            self._maybe_share(now)
-            if now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing and self.outing is None:
+            day = datetime.now().date().isoformat()
+            if self.panel is not None and self.panel.isVisible() and day != self._displayed_quota_day:
+                self._refresh(day=day)
+            self._maybe_invite(now, day)
+            if (now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing
+                    and self.outing is None and self.invitation is None):
                 self.next_outing = now + 60
                 self.start_exploring(automatic=True)
         except sqlite3.Error:
@@ -636,6 +642,7 @@ class ExplorationController(QObject):
     def shutdown(self):
         self.closing = True
         self.timer.stop()
+        self._cancel_invitation()
         if self.outing is not None:
             self._cancel("桌宠已退出。")
             if self.reply is not None:
