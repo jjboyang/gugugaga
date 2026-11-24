@@ -632,7 +632,8 @@ class ExplorationController(QObject):
                 self._refresh(day=day)
             self._maybe_invite(now, day)
             if (now - self.last_touch >= IDLE_BEFORE_EXPLORING and now >= self.next_outing
-                    and self.outing is None and self.invitation is None):
+                    and self.outing is None and self.invitation is None
+                    and self.rig.can_show_exploration(browsing=True)):
                 self.next_outing = now + 60
                 self.start_exploring(automatic=True)
         except sqlite3.Error:

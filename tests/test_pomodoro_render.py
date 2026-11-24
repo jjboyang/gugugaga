@@ -5,10 +5,11 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
+from pet.browsing_motion import HUM_START
 from pet.pomodoro_renderer import PomodoroRenderer
 from pet.rig_animator import RigRenderer
 from pet.rig_motion import RigPose
@@ -139,6 +140,30 @@ class PomodoroRenderingTests(unittest.TestCase):
         self.assertGreater(down.y(), hand.y())
         self.assertEqual(fixed_head, head)
         self.assertNotEqual(self.render("work_scroll", 0.28).toImage(), self.render("work_idle", 0.28).toImage())
+
+    def test_browsing_scrolls_then_rests_without_changing_illustrated_grip(self):
+        mode = "browsing"
+        before = self.renderer.texture(mode, 0.1).toImage()
+        during = self.renderer.texture(mode, 0.49).toImage()
+        rest = self.renderer.texture(mode, 1.0).toImage()
+        self.assertNotEqual(before.copy(210, 393, 63, 48), during.copy(210, 393, 63, 48))
+        self.assertEqual(before.copy(276, 396, 49, 48), during.copy(276, 396, 49, 48))
+        self.assertEqual(rest, self.renderer.texture(mode, 1.9).toImage())
+
+        hand, held_corner, head = QPointF(299, 418), QPointF(200, 437), QPointF(256, 295)
+        points = [hand, held_corner, head]
+        self.assertEqual(self.renderer.deform_vertices(points, mode, 1.0), points)
+        lifted, fixed_corner, fixed_head = self.renderer.deform_vertices(points, mode, 0.60)
+        self.assertLess(lifted.y(), hand.y() - 8)
+        self.assertEqual(fixed_corner, held_corner)
+        self.assertEqual(fixed_head, head)
+
+        t = HUM_START + 0.28
+        texture = self.renderer.texture(mode, t)
+        original = texture.toImage()
+        humming = self.renderer.paint(texture, mode, t, artwork_rendered=True).toImage()
+        self.assertNotEqual(humming.copy(378, 190, 40, 50), original.copy(378, 190, 40, 50))
+        self.assertEqual(humming.copy(0, 380, 512, 132), original.copy(0, 380, 512, 132))
 
     def test_empty_input_is_safe(self):
         self.assertTrue(self.renderer.paint(QPixmap(), "focus", 0).isNull())

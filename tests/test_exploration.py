@@ -13,6 +13,7 @@ import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from PIL import Image
@@ -27,6 +28,7 @@ from pet.exploration import (
     Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
     Discovery, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
 )
+from pet.browsing_motion import HUM_START
 from pet.exploration_agents import (
     DEEPSEEK_ASR_ENDPOINT, DEEPSEEK_CHAT_ENDPOINT, DEEPSEEK_FETCH_ENDPOINT, build_request, parse_result,
     parse_website_reaction, parse_website_search, website_links,
@@ -35,6 +37,7 @@ from pet.exploration_controller import DAILY_INVITATION_LIMIT, ExplorationContro
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
 from pet.exploration_pictures import PictureCandidate, collect_pictures
 from pet.exploration_video import AudioSample, TimedText, VideoMaterial, _audio, _frames, _parse_captions, playback_url, video_page
+from pet.rig_animator import RigAnimator
 from pet.window import PetWindow
 
 
@@ -513,6 +516,53 @@ class ExplorationIntegrationTests(unittest.TestCase):
         diary.finish(newer, replace(Discovery(**WEB_RESULT), title="更新的探索记录"))
         QTest.mouseClick(share.answer_button, Qt.LeftButton)
         self.assertEqual(controller.panel.entry_id, outing_id)
+
+    def test_automatic_and_manual_outings_render_the_tablet_and_release_it(self):
+        controller = self.controller
+        assets = Path(__file__).resolve().parents[1] / "pet" / "characters" / "dafeiyu" / "rig"
+        rig = RigAnimator(SimpleNamespace(current_phase="idle"), self.window, assets, parent=self.window)
+        sound = Mock()
+        sound.isPlaying.return_value = False
+        sound.play.side_effect = lambda: setattr(sound.isPlaying, "return_value", True)
+        sound.stop.side_effect = lambda: setattr(sound.isPlaying, "return_value", False)
+        controller.rig = rig
+        self.window.show()
+        rig.set_enabled(True)
+        rig.timer.stop()
+        self.assertEqual(controller.save_connection(self.connection("web", "web"), None, None), "")
+        self.assertEqual(controller.save_settings(ExplorationSettings(True, 2)), "")
+
+        with patch.object(rig, "_load_exploration_sound", return_value=sound), \
+                patch.object(rig.pomodoro_renderer, "apply_pose", wraps=rig.pomodoro_renderer.apply_pose) as pose:
+            controller.last_touch -= IDLE_BEFORE_EXPLORING + 1
+            rig.set_work_mode(True)
+            rig.set_work_action("typing")
+            controller._tick()
+            self.assertIsNone(controller.outing)
+            rig.set_work_action()
+            controller._tick()
+            self.assertTrue(controller.outing.automatic)
+            rig._paint(0.05)
+            self.assertEqual(pose.call_args.args[1], "browsing")
+            self.finish_round()
+            rig._paint(0.05)
+            self.assertEqual(pose.call_args.args[1], "browsing", "a fast reply leaves time to see the tablet")
+            rig.set_work_mode(False)
+
+            controller.open_panel()
+            controller.panel.explore.click()
+            self.assertFalse(controller.outing.automatic)
+            rig._paint(0.05)
+            self.assertEqual(pose.call_args.args[1], "browsing")
+            rig._exploration_elapsed = HUM_START - 0.02
+            rig._paint(0.05)
+            self.assertEqual(pose.call_args.args[1], "browsing")
+            sound.play.assert_called_once()
+            self.finish_round()
+            sound.stop.assert_called_once()
+            pose.reset_mock()
+            rig._paint(0.05)
+            pose.assert_not_called()
 
     def test_invitation_limit_survives_restart_and_resets_on_a_new_local_day(self):
         day = "2026-11-23"

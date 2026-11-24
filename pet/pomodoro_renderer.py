@@ -13,6 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient
 
+from pet import browsing_motion
 from pet.rig_motion import NodePose
 
 
@@ -31,12 +32,13 @@ class PomodoroRenderer:
     """
 
     MODES = frozenset((
-        "idle", "work_idle", "work_typing", "work_scroll", "focus", "focus_done", "break", "break_done", "activity", "toast", "clink", "work_stretch",
+        "idle", "work_idle", "work_typing", "work_scroll", "browsing", "focus", "focus_done", "break", "break_done", "activity", "toast", "clink", "work_stretch",
     ))
 
     def __init__(self, asset_dir=None):
         self.asset_dir = Path(asset_dir) if asset_dir else Path(__file__).parent / "characters" / "dafeiyu"
         self._textures = {}
+        self._illustrated = set()
         self._blink_layers = {}
         self._manifest = None
         self._atlas = None
@@ -95,6 +97,8 @@ class PomodoroRenderer:
                 }[name])
             elif image.size().width() != 512 or image.size().height() != 512:
                 raise ValueError(f"Pomodoro artwork must use a 512px square canvas: {path}")
+            else:
+                self._illustrated.add(name)
             self._textures[name] = image
         return self._textures[name]
 
@@ -149,6 +153,9 @@ class PomodoroRenderer:
         if mode not in self.MODES or mode == "idle":
             return None
         t = self._time(elapsed)
+        if mode == "browsing":
+            art = self._with_blink(self._artwork("scroll"), "scroll", eye_open)
+            return browsing_motion.tablet_texture(art, t) if "scroll" in self._illustrated else art
         if mode in {"focus", "work_idle", "work_typing", "work_scroll"}:
             name = "scroll" if mode == "work_scroll" else "focus"
             return self._with_blink(self._artwork(name), name, eye_open)
@@ -199,7 +206,9 @@ class PomodoroRenderer:
         left = pose.nodes.setdefault("arm_left", NodePose())
         right = pose.nodes.setdefault("arm_right", NodePose())
         head = pose.nodes.setdefault("head", NodePose())
-        if mode in {"focus", "work_typing", "work_scroll"}:
+        if mode == "browsing":
+            browsing_motion.apply_pose(head, pose.nodes.setdefault("body", NodePose()), t)
+        elif mode in {"focus", "work_typing", "work_scroll"}:
             if mode != "work_scroll" and not paused:
                 if mode == "focus":
                     burst = 1 - _smooth((t % 4.8 - 2.4) / 0.5)
@@ -226,6 +235,8 @@ class PomodoroRenderer:
         The taper goes to zero outside each local area, avoiding cutout seams.
         """
         t = self._time(elapsed)
+        if mode == "browsing":
+            return browsing_motion.deform_hand(vertices, t, self._grip_weight)
         if mode == "work_typing":
             tap = math.sin(t * 20) * 8
             return [QPointF(p.x(), p.y() + tap * (
@@ -290,6 +301,8 @@ class PomodoroRenderer:
             self._clink(painter, t)
         elif mode == "focus_done":
             self._chime(painter, t)
+        elif mode == "browsing":
+            browsing_motion.paint_hum(painter, t)
         painter.end()
         return result
 

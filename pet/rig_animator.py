@@ -9,13 +9,14 @@ import time
 from pathlib import Path
 import math
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor, QCursor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF,
     QRadialGradient, QTransform,
 )
 from PySide6.QtWidgets import QApplication
 
+from pet.browsing_motion import HUM_START
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
 from pet.companion import CallWalk, FaceReaction
@@ -399,6 +400,7 @@ class RigRenderer(OriginalMeshRenderer):
 class RigAnimator(QObject):
     """Run smooth visual motion independently of the logical sprite timers."""
 
+    BROWSING_MIN_SECONDS = 1.35
     frame_changed = Signal(QPixmap)
 
     def __init__(self, engine, window, asset_dir, parent=None):
@@ -414,7 +416,8 @@ class RigAnimator(QObject):
         self.work_action = None
         self._work_elapsed = 0.0
         self._exploring = False
-        self._exploration_elapsed = 0.0
+        self._exploration_elapsed = None
+        self._exploration_sound = None
         self._exploration_gesture = None
         self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
@@ -479,13 +482,60 @@ class RigAnimator(QObject):
         self._scroll_direction = direction
 
     def set_exploring(self, active):
+        if active == self._exploring:
+            return
         self._exploring = active
-        self._exploration_elapsed = 0.0
+        if active:
+            self._exploration_elapsed = 0.0
+            if self._exploration_sound is None:
+                self._exploration_sound = self._load_exploration_sound()
+        else:
+            self._stop_exploration_sound()
+            if not self.can_show_exploration(browsing=True):
+                self._exploration_elapsed = None
 
-    def can_show_exploration(self, *, allowed_speech=None):
+    def _load_exploration_sound(self):
+        source = self.renderer.asset_dir / "browsing_hum.wav"
+        if not source.is_file():
+            return None
+        try:
+            from PySide6.QtMultimedia import QSoundEffect
+        except ImportError:
+            return None
+        sound = QSoundEffect(self)
+        sound.setVolume(0.30)
+        sound.setSource(QUrl.fromLocalFile(str(source.resolve())))
+        return sound
+
+    def _stop_exploration_sound(self):
+        if self._exploration_sound is not None and self._exploration_sound.isPlaying():
+            self._exploration_sound.stop()
+
+    def _advance_browsing(self, elapsed):
+        age = self._exploration_elapsed
+        if age is None:
+            return None
+        visible = elapsed <= IdleBehavior.RESUME_GAP_S and self.can_show_exploration(browsing=True)
+        if not visible or (not self._exploring and age >= self.BROWSING_MIN_SECONDS):
+            self._stop_exploration_sound()
+            if not self._exploring:
+                self._exploration_elapsed = None
+            return None
+        # Advance visible time only. A suspended desktop or another gesture
+        # should never skip ahead and start playing the hum on a later frame.
+        self._exploration_elapsed = age + min(elapsed, 0.10)
+        if self._exploring and age < HUM_START <= self._exploration_elapsed:
+            if self._exploration_sound is not None:
+                self._exploration_sound.play()
+        return self._exploration_elapsed
+
+    def can_show_exploration(self, *, allowed_speech=None, browsing=False):
+        if browsing and (self.work_action or self.pomodoro_mode not in {"idle", "focus", "break"}):
+            return False
         return (self.enabled and self.engine.current_phase in {"idle", "sleep"}
                 and not (self.call or self.face.kind or self.social.kind
-                         or self._idle_blocked(allowed_speech=allowed_speech)))
+                         or getattr(self.window, "_dragging", False)
+                         or self._idle_blocked(allowed_speech=allowed_speech, allow_passive_modes=browsing)))
 
     def start_exploration_gesture(self, action, prompt):
         self.notify_user_activity()
@@ -506,6 +556,7 @@ class RigAnimator(QObject):
 
     def cancel_interaction(self):
         self._exploration_gesture = None
+        self._stop_exploration_sound()
         self.social.clear()
         self.call = None
         self.face.clear()
@@ -583,9 +634,10 @@ class RigAnimator(QObject):
         if self.social.kind:
             self.social.advance(elapsed, cursor)
         interacting = bool(self.call or self.face.kind or self.social.kind)
-        work = self.work_mode and not (dragging or interacting)
-        pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting)
-        exploring = self._exploring and not dragging and self.can_show_exploration()
+        browsing_time = self._advance_browsing(elapsed)
+        exploring = browsing_time is not None
+        work = self.work_mode and not (dragging or interacting or exploring)
+        pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting or exploring)
         paused = pomodoro and self.pomodoro_paused
         if paused and self._pomodoro_frame is not None:
             self.frame_changed.emit(self._pomodoro_frame)
@@ -631,9 +683,7 @@ class RigAnimator(QObject):
                 self._pomodoro_elapsed += elapsed
             animation_time = self._pomodoro_elapsed
         elif exploring:
-            mode = "work_scroll"
-            self._exploration_elapsed += elapsed
-            animation_time = self._exploration_elapsed
+            mode, animation_time = "browsing", browsing_time
         # A 512px logical canvas already covers the maximum 300px window at
         # normal DPI; only render larger when the actual screen needs it.
         scale = min(3.0, max(1.0, self.window.width() * self.window.devicePixelRatioF() / self.renderer.size[0]))
@@ -645,7 +695,7 @@ class RigAnimator(QObject):
             pixmap = self.renderer.render(
                 pose, scale=scale, texture=texture,
                 vertex_deformer=lambda vertices: self.pomodoro_renderer.deform_vertices(
-                    vertices, mode, animation_time, scroll_direction=1 if exploring else self._scroll_direction,
+                    vertices, mode, animation_time, scroll_direction=self._scroll_direction,
                 ),
             )
             pixmap = self.pomodoro_renderer.paint(
@@ -666,8 +716,8 @@ class RigAnimator(QObject):
             pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
         self.frame_changed.emit(pixmap)
 
-    def _idle_blocked(self, *, allowed_speech=None):
-        if self.work_mode or self.pomodoro_mode != "idle":
+    def _idle_blocked(self, *, allowed_speech=None, allow_passive_modes=False):
+        if not allow_passive_modes and (self.work_mode or self.pomodoro_mode != "idle"):
             return True
         if not self.window.isVisible() or getattr(self.window, "_left_down", False):
             return True
