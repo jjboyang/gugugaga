@@ -55,6 +55,7 @@ class PetWindow(QWidget):
     pomodoro_requested = Signal()
     work_mode_requested = Signal()
     exploration_requested = Signal()
+    music_history_requested = Signal()
     feed_requested = Signal()
     snack_given = Signal(QPoint)
     toast_clicked = Signal()
@@ -646,6 +647,10 @@ class PetWindow(QWidget):
             exploration_btn.setCursor(Qt.PointingHandCursor)
             exploration_btn.clicked.connect(lambda: self._on_menu_action(popup, "exploration"))
             layout.addWidget(exploration_btn)
+            music_btn = QPushButton("听歌记忆", popup)
+            music_btn.setCursor(Qt.PointingHandCursor)
+            music_btn.clicked.connect(lambda: self._on_menu_action(popup, "music_history"))
+            layout.addWidget(music_btn)
 
         character_btn = QPushButton("切换角色：企鹅 / 大肥鱼")
         character_btn.setCursor(Qt.PointingHandCursor)
@@ -714,6 +719,8 @@ class PetWindow(QWidget):
             self.work_mode_requested.emit()
         elif action == "exploration":
             self.exploration_requested.emit()
+        elif action == "music_history":
+            self.music_history_requested.emit()
         elif action == "quit":
             self.quit_requested.emit()
 

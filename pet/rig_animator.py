@@ -418,6 +418,7 @@ class RigAnimator(QObject):
         self._exploring = False
         self._exploration_elapsed = None
         self._exploration_sound = None
+        self.browsing_hum_source = None
         self._exploration_gesture = None
         self._scroll_direction = 0
         self._pomodoro_elapsed = 0.0
@@ -489,10 +490,27 @@ class RigAnimator(QObject):
             self._exploration_elapsed = 0.0
             if self._exploration_sound is None:
                 self._exploration_sound = self._load_exploration_sound()
+            if self.browsing_hum_source is not None:
+                self.refresh_browsing_hum()
         else:
             self._stop_exploration_sound()
             if not self.can_show_exploration(browsing=True):
                 self._exploration_elapsed = None
+
+    @property
+    def is_browsing(self):
+        return self._exploring
+
+    def refresh_browsing_hum(self):
+        sound = self._exploration_sound
+        if sound is None:
+            return
+        choice = self.browsing_hum_source() if self.browsing_hum_source is not None else None
+        source = choice or self.renderer.asset_dir / "browsing_hum.wav"
+        url = QUrl.fromLocalFile(str(source.resolve()))
+        if url != sound.source():
+            self._stop_exploration_sound()
+            sound.setSource(url)
 
     def _load_exploration_sound(self):
         source = self.renderer.asset_dir / "browsing_hum.wav"

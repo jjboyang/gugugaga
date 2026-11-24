@@ -9,6 +9,7 @@ from pet.window import PetWindow
 from pet.animation import AnimationEngine
 from pet.exploration_controller import ExplorationController
 from pet.ipc import PetIPC
+from pet.music_history import MusicMemory
 from pet.rig_animator import RigAnimator
 from pet.pomodoro_controller import PomodoroController
 from pet.work_mode import WorkMode
@@ -84,7 +85,9 @@ def main():
     exploration = ExplorationController(
         window, rig, is_active=lambda: selected_character[0] == "dafeiyu",
     )
+    music = MusicMemory(window, rig)
     app.aboutToQuit.connect(exploration.shutdown)
+    app.aboutToQuit.connect(music.shutdown)
     app.aboutToQuit.connect(work.stop)
 
     ipc = PetIPC()

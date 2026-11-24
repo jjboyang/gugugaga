@@ -3,3 +3,9 @@ Pillow>=10.0.0
 pynput>=1.8.1
 keyring>=25.0
 yt-dlp>=2026.10.26; python_version >= '3.10'
+numpy>=1.24
+winrt-Windows.Media.Control>=3.2,<4; sys_platform == 'win32'
+winrt-Windows.Media>=3.2,<4; sys_platform == 'win32'
+winrt-Windows.Foundation>=3.2,<4; sys_platform == 'win32'
+winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == 'win32'
+PyAudioWPatch>=0.2.12.7; sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'x86')
