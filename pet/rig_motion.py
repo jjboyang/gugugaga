@@ -202,6 +202,10 @@ class RigMotion:
             spring = self._springs[key]
             spring.velocity = _clamp(spring.velocity + impulse * strength, -limit, limit)
 
+    @property
+    def reacting_to_tap(self):
+        return self._tap_elapsed < 0.45
+
     def cancel_idle_actions(self):
         """Stop optional idle textures immediately; let bone motion settle."""
         for name in ("knock_blend", "hop_blend", "knock_impact"):

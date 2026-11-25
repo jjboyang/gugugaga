@@ -401,6 +401,10 @@ class RigAnimator(QObject):
     """Run smooth visual motion independently of the logical sprite timers."""
 
     BROWSING_MIN_SECONDS = 1.35
+    ACTIVE_FRAME_MS = 16
+    MODE_FRAME_MS = 32
+    IDLE_FRAME_MS = 40
+    QUIET_FRAME_MS = 83
     frame_changed = Signal(QPixmap)
 
     def __init__(self, engine, window, asset_dir, parent=None):
@@ -432,9 +436,10 @@ class RigAnimator(QObject):
         self.enabled = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.setInterval(16)
+        self.timer.setInterval(self.ACTIVE_FRAME_MS)
         self.timer.timeout.connect(self._tick)
         self._last_tick = None
+        self._last_presented_frame = None
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)
@@ -447,6 +452,7 @@ class RigAnimator(QObject):
         if enabled:
             self.motion.reset(self.engine.current_phase or "idle")
             self._last_tick = time.monotonic()
+            self._last_presented_frame = None
             self._paint(0.0)
             self.timer.start()
         else:
@@ -608,6 +614,8 @@ class RigAnimator(QObject):
         self.idle_behavior.notify_activity()
         self.motion.cancel_idle_actions()
         self._walk_origin = None
+        if self.enabled:
+            self._set_frame_interval(self.ACTIVE_FRAME_MS)
 
     def notify_drag_started(self):
         if self.enabled:
@@ -640,6 +648,16 @@ class RigAnimator(QObject):
         self._last_tick = now
         self._paint(max(0.0, elapsed))
 
+    def _set_frame_interval(self, interval):
+        if self.timer.interval() != interval:
+            self.timer.setInterval(interval)
+
+    def _present(self, pixmap):
+        key = pixmap.cacheKey(), self.window.width(), self.window.devicePixelRatioF()
+        if key != self._last_presented_frame:
+            self._last_presented_frame = key
+            self.frame_changed.emit(pixmap)
+
     def _paint(self, elapsed):
         center = self.window.frameGeometry().center()
         cursor = QCursor.pos()
@@ -658,7 +676,8 @@ class RigAnimator(QObject):
         pomodoro = self.pomodoro_mode != "idle" and not (work or dragging or interacting or exploring)
         paused = pomodoro and self.pomodoro_paused
         if paused and self._pomodoro_frame is not None:
-            self.frame_changed.emit(self._pomodoro_frame)
+            self._set_frame_interval(self.QUIET_FRAME_MS)
+            self._present(self._pomodoro_frame)
             return
         phase = "dragged" if dragging else "idle" if work or pomodoro or interacting or exploring else self.engine.current_phase or "idle"
         gesture = self._advance_exploration_gesture(elapsed)
@@ -685,6 +704,20 @@ class RigAnimator(QObject):
             idle_action=cue.action, action_elapsed=cue.elapsed,
             action_duration=cue.duration, walk_cue=cue if cue.action == "walk" else None,
         )
+        # Small background motions can update less often. Keep the original
+        # cadence for gestures, movement, and immediate reactions.
+        if (dragging or interacting or cue.action or self.motion.reacting_to_tap
+                or phase not in {"idle", "sleep"}
+                or (pomodoro and self.pomodoro_mode == "focus_done")):
+            interval = self.ACTIVE_FRAME_MS
+        elif phase == "sleep" or paused:
+            interval = self.QUIET_FRAME_MS
+        elif exploring or pomodoro or (work and self.work_action):
+            interval = self.MODE_FRAME_MS
+        else:
+            interval = self.IDLE_FRAME_MS
+        self._set_frame_interval(interval)
+
         self.window.face_rise_ratio = pose.walk_blend * self.renderer._WALK_RISE / self.renderer.size[1]
         if self.face.kind:
             self.face.apply(pose, elapsed)
@@ -732,7 +765,7 @@ class RigAnimator(QObject):
                     texture = self.social.eating_texture(self.renderer._awake_texture(pose))
                     deformer = self.social.lift_snack
             pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
-        self.frame_changed.emit(pixmap)
+        self._present(pixmap)
 
     def _idle_blocked(self, *, allowed_speech=None, allow_passive_modes=False):
         if not allow_passive_modes and (self.work_mode or self.pomodoro_mode != "idle"):

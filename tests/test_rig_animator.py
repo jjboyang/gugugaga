@@ -249,6 +249,52 @@ class RigAnimatorTests(unittest.TestCase):
         self.assertFalse(self.animator.enabled)
         self.assertFalse(self.animator.timer.isActive())
 
+    def test_animation_cadence_follows_the_visible_motion(self):
+        rig = self.animator
+        self.window.show()
+        rig.set_enabled(True)
+        rig.timer.stop()
+        self.assertEqual(rig.timer.interval(), rig.IDLE_FRAME_MS)
+
+        rig.idle_behavior.force_action("walk")
+        rig._paint(0.2)
+        self.assertEqual(rig.timer.interval(), rig.ACTIVE_FRAME_MS)
+
+        self.engine.set_state("sleep")
+        rig._paint(0.1)
+        self.assertEqual(rig.timer.interval(), rig.QUIET_FRAME_MS)
+        self.engine.notify_pet_tap()
+        rig.notify_tap()
+        rig._paint(0.05)
+        self.assertEqual(rig.timer.interval(), rig.ACTIVE_FRAME_MS)
+
+        rig.set_work_mode(True)
+        rig.set_work_action("typing")
+        rig._paint(0.5)
+        self.assertEqual(rig.timer.interval(), rig.MODE_FRAME_MS)
+
+    def test_paused_pose_is_presented_only_when_needed(self):
+        rig = self.animator
+        rig.set_enabled(True)
+        rig.timer.stop()
+        rig.set_pomodoro("focus")
+        rig._paint(0.1)
+        focused = self.frames[-1].cacheKey()
+        count = len(self.frames)
+
+        rig.set_pomodoro("focus", paused=True)
+        rig._paint(0.1)
+        rig._paint(0.1)
+        self.assertEqual(len(self.frames), count)
+        self.assertEqual(rig.timer.interval(), rig.QUIET_FRAME_MS)
+
+        rig.set_work_mode(True)
+        rig._paint(0.1)
+        self.assertNotEqual(self.frames[-1].cacheKey(), focused)
+        rig.set_work_mode(False)
+        rig._paint(0.1)
+        self.assertEqual(self.frames[-1].cacheKey(), focused)
+
     def test_sleep_tap_and_dragged_ipc_preserve_engine_semantics(self):
         self.engine.set_state("sleep")
         self.assertFalse(self.engine._waddle_timer.isActive())

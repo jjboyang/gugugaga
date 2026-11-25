@@ -171,12 +171,18 @@ class OriginalMeshRenderer:
 
     def _make_grid(self, columns, rows):
         self.vertices, self.weights, self.triangles = [], [], []
+        self._skin_points = []
         self._triangle_sources = []
         for row in range(rows + 1):
             for column in range(columns + 1):
                 x, y = column * self.size[0] / columns, row * self.size[1] / rows
                 self.vertices.append(QPointF(x, y))
-                self.weights.append(self._weights_at(x, y))
+                weights = self._weights_at(x, y)
+                self.weights.append(weights)
+                self._skin_points.append(tuple(
+                    (bone, x - self.pivots[bone][0], y - self.pivots[bone][1], weight)
+                    for bone, weight in weights.items()
+                ))
         for row in range(rows):
             for column in range(columns):
                 a = row * (columns + 1) + column
@@ -194,8 +200,7 @@ class OriginalMeshRenderer:
                     ).adjusted(-1, -1, 1, 1)
                     # Sleep's ZZZ and the lifted pose extend beyond idle's
                     # bounds. Keep the complete shared mesh for every texture.
-                    active = True
-                    self._triangle_sources.append((p.x(), p.y(), u1, v1, u2, v2, determinant, rect, active))
+                    self._triangle_sources.append((p.x(), p.y(), u1, v1, u2, v2, determinant, rect))
 
     def transforms(self, pose):
         """Return bone-origin world transforms and inherited opacity, as before."""
@@ -241,14 +246,14 @@ class OriginalMeshRenderer:
         return self._deformed_vertices(self.transforms(pose), pose)
 
     def _deformed_vertices(self, transforms, pose=None):
+        maps = {bone: transform.map for bone, (transform, _) in transforms.items()}
         vertices = []
-        for point, weights in zip(self.vertices, self.weights):
+        for influences in self._skin_points:
             x = y = 0.0
-            for bone, weight in weights.items():
-                px, py = self.pivots[bone]
-                transformed = transforms[bone][0].map(QPointF(point.x() - px, point.y() - py))
-                x += transformed.x() * weight
-                y += transformed.y() * weight
+            for bone, bind_x, bind_y, weight in influences:
+                mapped_x, mapped_y = maps[bone](bind_x, bind_y)
+                x += mapped_x * weight
+                y += mapped_y * weight
             vertices.append(QPointF(x, y))
         idle_action = pose.idle_action if pose is not None and pose.phase == "idle" else ""
         if idle_action == "walk" and pose.walk_blend:
@@ -360,25 +365,26 @@ class OriginalMeshRenderer:
             # preserving transparent hair pixels instead of doubling their alpha.
             painter.setRenderHint(QPainter.Antialiasing, False)
             painter.setCompositionMode(QPainter.CompositionMode_Source)
-            for triangle, source in zip(self.triangles, self._triangle_sources):
-                x0, y0, u1, v1, u2, v2, determinant, rect, active = source
-                if not active:
-                    continue
-                p, q, r = (vertices[index] for index in triangle)
-                dx1, dy1 = q.x() - p.x(), q.y() - p.y()
-                dx2, dy2 = r.x() - p.x(), r.y() - p.y()
+            coordinates = [(point.x(), point.y()) for point in vertices]
+            for (a, b, c), source in zip(self.triangles, self._triangle_sources):
+                x0, y0, u1, v1, u2, v2, determinant, rect = source
+                px, py = coordinates[a]
+                qx, qy = coordinates[b]
+                rx, ry = coordinates[c]
+                dx1, dy1 = qx - px, qy - py
+                dx2, dy2 = rx - px, ry - py
                 m11 = (dx1 * v2 - dx2 * v1) / determinant
                 m21 = (dx2 * u1 - dx1 * u2) / determinant
                 m12 = (dy1 * v2 - dy2 * v1) / determinant
                 m22 = (dy2 * u1 - dy1 * u2) / determinant
                 affine = QTransform(
                     m11, m12, m21, m22,
-                    p.x() - m11 * x0 - m21 * y0,
-                    p.y() - m12 * x0 - m22 * y0,
+                    px - m11 * x0 - m21 * y0,
+                    py - m12 * x0 - m22 * y0,
                 )
-                clip = QPainterPath(p)
-                clip.lineTo(q)
-                clip.lineTo(r)
+                clip = QPainterPath(vertices[a])
+                clip.lineTo(vertices[b])
+                clip.lineTo(vertices[c])
                 clip.closeSubpath()
                 painter.save()
                 painter.setClipPath(clip, Qt.ReplaceClip)
