@@ -86,7 +86,8 @@ class PetWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
-        self.setStyleSheet("background: transparent;")
+        # Child dialogs and their tooltips paint their own backgrounds.
+        self.setStyleSheet("PetWindow { background: transparent; }")
         self.setFixedSize(self._pet_size, self._pet_size)
 
         # availableGeometry() is in global coordinates; on macOS / multi-monitor

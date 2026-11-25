@@ -21,8 +21,9 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QHelpEvent, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton, QToolTip
 
 from pet.exploration import (
     Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
@@ -382,6 +383,29 @@ class ExplorationIntegrationTests(unittest.TestCase):
         with patch("pet.exploration_panel.QDesktopServices.openUrl") as open_url:
             panel.source.click()
         self.assertEqual(open_url.call_args.args[0].toString(), WEB_RESULT["url"])
+
+    def test_history_title_tooltip_uses_its_own_background(self):
+        diary = self.controller.diary
+        now = datetime.now()
+        entry = diary.reserve(self.connection("web", "web"), Activity("海鸟", "web", "海鸟"),
+                              now.timestamp(), now.date().isoformat(), 3)
+        title = "这是一条在探索记录列表里显示不全的长视频标题"
+        diary.finish(entry, replace(Discovery(**WEB_RESULT), title=title))
+        self.controller.open_panel()
+        self.app.processEvents()
+
+        history = self.controller.panel.history
+        point = history.visualItemRect(history.item(0)).center()
+        viewport = history.viewport()
+        event = QHelpEvent(QEvent.ToolTip, point, viewport.mapToGlobal(point))
+        expected_background = QToolTip.palette().color(QPalette.Inactive, QPalette.ToolTipBase)
+        self.app.sendEvent(viewport, event)
+        tooltip = next((widget for widget in self.app.topLevelWidgets()
+                        if widget.windowType() == Qt.ToolTip and widget.isVisible()), None)
+        self.assertIsNotNone(tooltip)
+        self.addCleanup(tooltip.hide)
+        self.assertEqual(QToolTip.text(), title)
+        self.assertEqual(tooltip.palette().color(QPalette.Inactive, QPalette.ToolTipBase), expected_background)
 
     def test_open_exploration_panel_resets_daily_quota_at_local_midnight(self):
         controller = self.controller
