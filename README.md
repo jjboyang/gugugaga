@@ -26,6 +26,7 @@
 
 - Python 3.11+
 - Windows / macOS / Linux
+- Windows 使用标准 64 位 CPython 3.11 至 3.15。Python 3.15 使用 WinRT 4，依赖通过预编译包安装。
 
 ### 安装依赖
 
@@ -51,6 +52,8 @@ python pet_app.py
 
 - **macOS**：双击仓库根目录的 `start-pet.command`，或运行 `./scripts/macos/start-pet.sh`
 - **Windows**：双击或运行 `scripts\windows\start-pet.cmd`
+
+Windows 启动脚本会复用兼容的 `.venv`。已有环境的 Python 不兼容时，脚本在找到可用的 Python 后将旧环境移到 `.venv-backup-*`，然后创建新环境。
 
 企鹅会出现在屏幕右下角，始终置顶。
 

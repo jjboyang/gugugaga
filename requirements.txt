@@ -4,8 +4,13 @@ pynput>=1.8.1
 keyring>=25.0
 yt-dlp>=2026.10.26; python_version >= '3.10'
 numpy>=1.24
-winrt-Windows.Media.Control>=3.2,<4; sys_platform == 'win32'
-winrt-Windows.Media>=3.2,<4; sys_platform == 'win32'
-winrt-Windows.Foundation>=3.2,<4; sys_platform == 'win32'
-winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == 'win32'
+# WinRT 3.x ends at CPython 3.14. Keep the projection packages on the same generation.
+winrt-Windows.Media.Control>=3.2,<4; sys_platform == 'win32' and python_version < '3.15'
+winrt-Windows.Media>=3.2,<4; sys_platform == 'win32' and python_version < '3.15'
+winrt-Windows.Foundation>=3.2,<4; sys_platform == 'win32' and python_version < '3.15'
+winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == 'win32' and python_version < '3.15'
+winrt-Windows.Media.Control>=4!10.0.28000.2705,<5!0; sys_platform == 'win32' and python_version >= '3.15'
+winrt-Windows.Media>=4!10.0.28000.2705,<5!0; sys_platform == 'win32' and python_version >= '3.15'
+winrt-Windows.Foundation>=4!10.0.28000.2705,<5!0; sys_platform == 'win32' and python_version >= '3.15'
+winrt-Windows.Foundation.Collections>=4!10.0.28000.2705,<5!0; sys_platform == 'win32' and python_version >= '3.15'
 PyAudioWPatch>=0.2.12.7; sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'x86')
