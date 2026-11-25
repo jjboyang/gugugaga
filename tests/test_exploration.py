@@ -27,7 +27,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QToolTip
 
 from pet.exploration import (
     Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
-    Discovery, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
+    Discovery, ExplorationPicture, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
 )
 from pet.browsing_motion import HUM_START
 from pet.exploration_agents import (
@@ -38,6 +38,7 @@ from pet.exploration_controller import DAILY_INVITATION_LIMIT, ExplorationContro
 from pet.exploration_panel import AgentConnectionDialog, AgentSettingsPanel, WebsiteSettingsPanel
 from pet.exploration_pictures import PictureCandidate, collect_pictures
 from pet.exploration_video import AudioSample, TimedText, VideoMaterial, _audio, _frames, _parse_captions, playback_url, video_page
+from pet.photo_share_motion import DURATION_SECONDS, REVEAL_SECONDS
 from pet.rig_animator import RigAnimator
 from pet.window import PetWindow
 
@@ -534,12 +535,55 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertIsNone(controller.invitation)
         self.assertIsNone(diary.latest_unshared())
         share = self.window._speech_popup
-        self.assertIn("我想看看", share.reply.text)
-        self.assertEqual(share.answer_button.text(), "看看")
-        newer = diary.reserve(agent, activity, date.timestamp() + 1, day, 3)
-        diary.finish(newer, replace(Discovery(**WEB_RESULT), title="更新的探索记录"))
-        QTest.mouseClick(share.answer_button, Qt.LeftButton)
-        self.assertEqual(controller.panel.entry_id, outing_id)
+        self.assertEqual(share.reply.text, WEB_RESULT["reaction"] + "\n" + WEB_RESULT["observation"])
+        self.assertIsNone(share.answer_button)
+        self.assertTrue(share.isVisible())
+        self.assertIsNone(controller.panel)
+
+    def test_invitation_reveals_the_saved_photo_after_looking_through_prints(self):
+        controller = self.controller
+        assets = Path(__file__).resolve().parents[1] / "pet" / "characters" / "dafeiyu" / "rig"
+        rig = RigAnimator(SimpleNamespace(current_phase="idle", notify_user_activity=lambda: None),
+                          self.window, assets, parent=self.window)
+        controller.rig = rig
+        self.window.show()
+        rig.set_enabled(True)
+        rig.timer.stop()
+        diary = controller.diary
+        now = datetime.now()
+        day = now.date().isoformat()
+        outing_id = diary.reserve(self.connection("web", "web"), Activity("海鸟", "web", "海鸟"),
+                                  now.timestamp(), day, 3)
+        picture = ExplorationPicture(PICTURE_URL, "article", PICTURE_REASON, picture_bytes("JPEG"))
+        diary.finish(outing_id, replace(Discovery(**WEB_RESULT), picture=picture))
+        controller._maybe_invite(time.monotonic(), day)
+
+        controller._maybe_invite(controller.next_invitation, day)
+        QTest.mouseClick(controller.invitation.answer_button, Qt.LeftButton)
+        rig._paint(0.45)
+        self.assertEqual(rig.social.kind, "exploration_photo")
+        self.assertIsNone(self.window._speech_popup)
+        rig.cancel_interaction()
+        rig._paint(REVEAL_SECONDS)
+        self.assertIsNone(self.window._speech_popup)
+        self.assertEqual(diary.latest_unshared()["id"], outing_id)
+
+        controller._maybe_invite(controller.next_invitation, day)
+        QTest.mouseClick(controller.invitation.answer_button, Qt.LeftButton)
+        rig._paint(REVEAL_SECONDS - 0.12)
+        self.assertEqual(rig.social.kind, "exploration_photo")
+        self.assertIsNone(self.window._speech_popup)
+        rig._paint(0.14)
+        share = self.window._speech_popup
+        self.assertTrue(share.isVisible())
+        self.assertEqual(share.reply.text, PICTURE_REASON)
+        self.assertEqual(share.image.size().toTuple(), (320, 240))
+        self.assertIsNone(share.answer_button)
+        self.assertIsNone(controller.panel)
+        self.assertIsNone(diary.latest_unshared())
+        rig._paint(DURATION_SECONDS - REVEAL_SECONDS)
+        self.assertEqual(rig.social.kind, "")
+        self.assertIs(self.window._speech_popup, share)
 
     def test_automatic_and_manual_outings_render_the_tablet_and_release_it(self):
         controller = self.controller

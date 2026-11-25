@@ -7,6 +7,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QCursor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel
 
+from pet import photo_share_motion
 from pet.companion import smooth
 
 
@@ -61,6 +62,8 @@ class SocialGestures:
         self.pointer_food.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.pointer_food.setStyleSheet("background: transparent")
         self.prompt = None
+        self.photo = None
+        self._reveal_photo = None
         self.kind = ""
         self.age = 0.0
         self.hover = 0.0
@@ -78,6 +81,8 @@ class SocialGestures:
         if self.prompt is not None and self.prompt is self.window._speech_popup:
             self.window._dismiss_speech_bubble()
         self.prompt = None
+        self.photo = None
+        self._reveal_photo = None
         self.kind = ""
         self.age = self.hover = 0.0
 
@@ -114,6 +119,13 @@ class SocialGestures:
 
     def answer_joke(self):
         self._start("laugh")
+
+    def show_exploration_photo(self, image, on_reveal):
+        if not self.rig.can_show_exploration() or not self._start("exploration_photo"):
+            return False
+        self.photo = image
+        self._reveal_photo = on_reveal
+        return True
 
     def greet_after_work(self):
         if (self.rig.work_mode and not self.kind and not self.rig.call and not self.rig.face.kind
@@ -162,6 +174,15 @@ class SocialGestures:
             self.clear()
         elif self.kind in {"clink", "stretch"} and t >= 2.6:
             self.clear()
+        elif self.kind == "exploration_photo":
+            if before < photo_share_motion.REVEAL_SECONDS:
+                if self.rig._idle_blocked():
+                    self.clear()
+                    return
+                if t >= photo_share_motion.REVEAL_SECONDS:
+                    self._reveal_photo()
+            if t >= photo_share_motion.DURATION_SECONDS:
+                self.clear()
 
     def apply_pose(self, pose):
         t = self.age
@@ -188,6 +209,8 @@ class SocialGestures:
             pose.eye_open = min(pose.eye_open, 1 - grin)
             head.angle += 3 * grin
             pose.nodes["body"].dy -= abs(math.sin((t - 0.32) * 7.4)) * 5 * grin
+        elif self.kind == "exploration_photo":
+            photo_share_motion.apply_pose(pose, t)
 
     def eating_texture(self, awake):
         t = self.age

@@ -16,6 +16,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QApplication
 
+from pet import photo_share_motion
 from pet.browsing_motion import HUM_START
 from pet.rig_motion import NodePose, RigMotion
 from pet.rig_mesh import OriginalMeshRenderer
@@ -764,6 +765,10 @@ class RigAnimator(QObject):
                 if self.social.kind == "eat":
                     texture = self.social.eating_texture(self.renderer._awake_texture(pose))
                     deformer = self.social.lift_snack
+                elif self.social.kind == "exploration_photo":
+                    texture = photo_share_motion.texture(
+                        self.renderer._awake_texture(pose), self.social.photo, self.social.age,
+                    )
             pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
         self._present(pixmap)
 

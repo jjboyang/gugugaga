@@ -18,7 +18,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
 )
-from pet.speech_bubble import Reply, SpeechBubble, choose_reply
+from pet.speech_bubble import DiscoveryBubble, Reply, SpeechBubble, choose_reply
 
 
 # Logical pet footprint (sprites scale to fit). 30% smaller than the prior 200px default.
@@ -453,10 +453,9 @@ class PetWindow(QWidget):
             on_answer=on_reply, answer_on_pet_tap=True,
         )
 
-    def share_exploration_note(self, text, open_note):
-        return self._show_speech_bubble(
-            Reply(text, "whale"), answer="看看", hold_ms=9000, on_answer=open_note,
-        )
+    def share_exploration_note(self, text, image):
+        self._dismiss_speech_bubble()
+        return self._present_speech_bubble(DiscoveryBubble(text, image, self._pet_size, self))
 
     def _show_speech_bubble(self, reply, *, answer="", hold_ms=None, on_answer=None, answer_on_pet_tap=False):
         """Replace the previous reply without an old timer hiding the new one."""
@@ -467,6 +466,9 @@ class PetWindow(QWidget):
                              answer_accessible_name=answer if on_answer else "", answer_on_pet_tap=answer_on_pet_tap)
         if answer:
             popup.answered.connect(on_answer if on_answer is not None else self.joke_answered)
+        return self._present_speech_bubble(popup)
+
+    def _present_speech_bubble(self, popup):
         self._speech_popup = popup
         popup.dismissed.connect(lambda: self._speech_dismissed(popup))
         self._position_speech_bubble()

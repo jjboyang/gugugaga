@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import random
 import sys
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QPushButton, QWidget
 
@@ -198,7 +198,12 @@ class SpeechBubble(QWidget):
         painter.setPen(QPen(QColor("#a9c8e8" if fish else "#dfcba9"), 1.2))
         painter.drawPath(shape)
 
+        self._paint_content(painter, body, accent, ink)
+        painter.end()
+
+    def _paint_content(self, painter, body, accent, ink):
         # The character's blue/white trim becomes a tiny illustrated mood badge.
+        fish = self.character == "dafeiyu"
         badge = QPointF(body.left() + 24, body.center().y())
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#e0edfc" if fish else "#f5e7ce"))
@@ -212,7 +217,6 @@ class SpeechBubble(QWidget):
         painter.setPen(ink)
         painter.drawText(QRectF(body.left() + 48, body.top(), body.width() - 58, body.height()),
                          Qt.AlignLeft | Qt.AlignVCenter, self.reply.text)
-        painter.end()
 
     def _paint_mood(self, p, accent, ink):
         p.setPen(QPen(accent, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -270,3 +274,66 @@ class SpeechBubble(QWidget):
             beak.lineTo(0, 6)
             beak.closeSubpath()
             p.drawPath(beak)
+
+
+class DiscoveryBubble(SpeechBubble):
+    """A picture and optional caption, or a wrapped discovery beside the pet."""
+
+    TEXT_FLAGS = Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap | Qt.TextWrapAnywhere
+    INSET = 12
+
+    def __init__(self, text, image, pet_size, parent):
+        hold_ms = max(11_000 if not image.isNull() else 8_000, min(28_000, 4_000 + len(text) * 80))
+        super().__init__(Reply(text, "whale"), pet_size=pet_size, parent=parent, hold_ms=hold_ms)
+        self.image = image
+        self._font.setPixelSize(min(16, self._font.pixelSize()))
+        self._font.setWeight(QFont.Medium)
+        self._available_size = QSize()
+        self._image_size = QSize()
+        self.setAccessibleName(text or "大肥鱼分享的图片")
+
+    def place(self, pet_geometry, available, avoid=None):
+        bounds = available.size()
+        if self._available_size != bounds:
+            self._available_size = bounds
+            self._fit_content(bounds)
+        super().place(pet_geometry, available, avoid)
+
+    def _fit_content(self, bounds):
+        metrics = QFontMetrics(self._font)
+        text = self.reply.text
+        line_width = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=0)
+        preferred_width = max(150, line_width + 40)
+        if not self.image.isNull():
+            preferred_width = max(preferred_width, 284)
+        max_width = 420 if len(text) > 240 else 344
+        width = min(preferred_width, max_width, bounds.width() - 8)
+        content_width = max(1, width - 16 - 2 * self.INSET)
+        text_height = metrics.boundingRect(QRect(0, 0, content_width, 0), self.TEXT_FLAGS, text).height() if text else 0
+        content_height = max(1, bounds.height() - 8 - 24 - 2 * self.INSET)
+        self._image_size = QSize(0, 0)
+        if not self.image.isNull():
+            image_height = min(176, max(1, content_height - text_height - (8 if text else 0)))
+            self._image_size = self.image.size().scaled(content_width, image_height, Qt.KeepAspectRatio)
+        spacing = 8 if text and not self._image_size.isEmpty() else 0
+        height = min(content_height, text_height + self._image_size.height() + spacing)
+        self.setFixedSize(width, height + 24 + 2 * self.INSET)
+
+    def _paint_content(self, painter, body, accent, ink):
+        content = body.adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET)
+        painter.setClipRect(content)
+        if not self._image_size.isEmpty():
+            image_rect = QRectF(content.center().x() - self._image_size.width() / 2, content.top(),
+                                self._image_size.width(), self._image_size.height())
+            painter.save()
+            clip = QPainterPath()
+            clip.addRoundedRect(image_rect, 9, 9)
+            painter.setClipPath(clip)
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.drawImage(image_rect, self.image)
+            painter.restore()
+            content.setTop(image_rect.bottom() + 8)
+        if self.reply.text:
+            painter.setFont(self._font)
+            painter.setPen(ink)
+            painter.drawText(content, self.TEXT_FLAGS, self.reply.text)

@@ -13,6 +13,7 @@ from threading import Event, Thread
 import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl
+from PySide6.QtGui import QImage
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from pet.exploration import (
@@ -583,14 +584,35 @@ class ExplorationController(QObject):
         self.last_touch = time.monotonic()
 
     def _accept_invitation(self, entry):
-        if not self.is_active() or self.diary is None:
+        if self.closing or not self.is_active() or self.diary is None:
             return
         self._touched()
         try:
-            if self.diary.mark_shared(entry["id"]):
-                reaction = entry["reaction"]
-                teaser = reaction if len(reaction) <= 18 else reaction[:17] + "…"
-                self.window.share_exploration_note(teaser, lambda: self.open_panel(entry_id=entry["id"]))
+            picture = self.diary.picture(entry["id"])
+        except sqlite3.Error:
+            self.status = DIARY_ERROR
+            self._refresh()
+            return
+
+        image = QImage.fromData(picture.jpeg, "JPEG") if picture else QImage()
+        if not image.isNull():
+            def reveal():
+                self._share_invited_note(entry["id"], picture.reason, image)
+
+            if self.rig.social.show_exploration_photo(image, reveal):
+                return
+
+        reaction, observation = entry["reaction"], entry["observation"]
+        text = reaction if reaction == observation else "\n".join(filter(None, (reaction, observation)))
+        self._share_invited_note(entry["id"], text, QImage())
+
+    def _share_invited_note(self, entry_id, text, image):
+        if (self.closing or not self.is_active() or self.diary is None or not self.window.isVisible()
+                or (self.panel is not None and self.panel.isVisible())):
+            return
+        try:
+            if self.diary.mark_shared(entry_id):
+                self.window.share_exploration_note(text, image)
         except sqlite3.Error:
             self.status = DIARY_ERROR
             self._refresh()

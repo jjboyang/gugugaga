@@ -6,10 +6,11 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from pet.speech_bubble import DAFEIYU_REPLIES, PENGUIN_REPLY, SpeechBubble, choose_reply
+from pet.speech_bubble import DAFEIYU_REPLIES, PENGUIN_REPLY, DiscoveryBubble, SpeechBubble, choose_reply
 from pet.window import PetWindow
 
 
@@ -119,6 +120,23 @@ class SpeechBubbleTests(unittest.TestCase):
                     self.assertTrue(available.contains(popup.geometry()))
                     self.assertEqual(popup.tail_on_top, y == -200)
                     self.assertTrue(30 <= popup.tail_x <= popup.width() - 30)
+
+    def test_discovery_content_wraps_or_scales_to_the_pet_monitor(self):
+        available = QRect(-540, 40, 360, 480)
+        pet = QRect(available.right() - 139, available.top(), 140, 140)
+        text = "我看到白色的海鸥先绕着岸边兜了一圈，才落在栏杆上。" * 8
+        portrait = QImage(300, 640, QImage.Format_RGB32)
+        portrait.fill(Qt.blue)
+        for caption, image in ((text, QImage()), ("", portrait)):
+            with self.subTest(has_picture=not image.isNull()):
+                popup = DiscoveryBubble(caption, image, 140, self.window)
+                self.addCleanup(popup.close)
+                popup.place(pet, available)
+                self.assertTrue(available.contains(popup.geometry()))
+                self.assertGreater(popup.height(), 100)
+                self.assertTrue(popup.tail_on_top)
+                popup.show()
+                self.assertFalse(popup.grab().isNull())
 
 
 if __name__ == "__main__":
