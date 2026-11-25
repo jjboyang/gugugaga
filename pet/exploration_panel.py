@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime
 import sqlite3
+import time
 from uuid import uuid4
 
-from PySide6.QtCore import QRect, Qt, QUrl
+from PySide6.QtCore import QEvent, QRect, Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QImage, QPainter
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
@@ -223,6 +224,8 @@ class ExplorationPanel(QDialog):
         self.controller = controller
         self.entries = []
         self.entry_id = None
+        self._reading_id = None
+        self._read_since = None
         self.setWindowTitle("大肥鱼在干嘛")
         self.setMinimumHeight(420)
         layout = themed_layout(self, 736, 580, minimum_width=620)
@@ -254,7 +257,8 @@ class ExplorationPanel(QDialog):
         self.history_count = label(role="muted")
         timeline_layout.addLayout(heading_row("探索记录", self.history_count))
         self.history = card_list("探索记录")
-        self.history.currentRowChanged.connect(self._show_entry)
+        self.history.currentRowChanged.connect(self._select_entry)
+        self.history.itemClicked.connect(lambda _item: self.begin_reading())
         timeline_layout.addWidget(self.history, 1)
         content.addWidget(timeline, 0, Qt.AlignTop)
 
@@ -338,8 +342,51 @@ class ExplorationPanel(QDialog):
         self.settings_button.setEnabled(available)
         self.explore.setEnabled(connected and not exploring)
 
+    def _select_entry(self, index):
+        self._show_entry(index)
+        self.begin_reading()
+
+    def begin_reading(self):
+        index = self.history.currentRow()
+        if not self.isVisible() or not 0 <= index < len(self.entries):
+            return
+        entry = self.entries[index]
+        if not (entry["is_video"] or video_page(entry["url"]) or entry["video_start_ms"] is not None
+                or entry["evidence_kind"] in {"transcript", "subtitle", "audio_transcript", "video_frame"}):
+            return
+        self._reading_id = entry["id"]
+        if self.isActiveWindow() and not self.isMinimized() and self._read_since is None:
+            self._read_since = time.monotonic()
+
+    def _pause_reading(self):
+        since, self._read_since = self._read_since, None
+        if since is not None and self.controller.diary is not None:
+            try:
+                self.controller.diary.record_video_read(self._reading_id, datetime.now(), time.monotonic() - since)
+            except sqlite3.Error:
+                pass
+
+    def finish_reading(self):
+        self._pause_reading()
+        self._reading_id = None
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if (event.type() in (QEvent.ActivationChange, QEvent.WindowStateChange)
+                and getattr(self, "_reading_id", None) is not None):
+            if self.isActiveWindow() and not self.isMinimized():
+                self.begin_reading()
+            else:
+                self._pause_reading()
+
+    def hideEvent(self, event):
+        self.finish_reading()
+        super().hideEvent(event)
+
     def _show_entry(self, index):
         entry = self.entries[index] if 0 <= index < len(self.entries) else None
+        if self._reading_id is not None and (entry is None or self._reading_id != entry["id"]):
+            self.finish_reading()
         self.pages.setCurrentIndex(0 if entry else 1)
         self.source.setVisible(entry is not None)
         self.source_url = entry["url"] if entry else ""

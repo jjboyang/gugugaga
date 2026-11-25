@@ -199,6 +199,22 @@ class MusicMemoryTests(unittest.TestCase):
         self.assertFalse(self.memory.history.enabled())
         self.assertFalse(self.memory.timer.isActive())
 
+    def test_exploration_uses_recent_listening_with_separate_track_name_setting(self):
+        self.enable()
+        today = datetime(2026, 11, 25).date()
+        history = self.memory.history
+        track = PlayingTrack("潮水 (Live)", "测试歌手", "player")
+        for offset in (0, 2):
+            history.add_listen(track, (today - timedelta(days=offset)).isoformat(), 180, offset)
+        history.add_listen(PlayingTrack("跳过", "", "player"), today.isoformat(), 2, 0)
+        history.add_listen(PlayingTrack("旧歌", "", "player"), (today - timedelta(days=9)).isoformat(), 180, 0)
+        self.assertEqual(self.memory.exploration_topics(today), [("音乐现场", 4)])
+        self.memory.open_panel()
+        self.memory.panel.explore_music.click()
+        self.assertEqual(self.memory.exploration_topics(today), [("潮水 (Live) 测试歌手", 4)])
+        self.memory.set_enabled(False)
+        self.assertEqual(self.memory.exploration_topics(today), [])
+
     def test_mac_listening_panel_hints_at_qq_music_setup_when_needed(self):
         with patch("pet.music_history.sys", SimpleNamespace(platform="darwin")), \
                 patch("pet.music_history.mac_media_control_path", return_value=None) as lookup:

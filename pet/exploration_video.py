@@ -14,10 +14,10 @@ from subprocess import DEVNULL, Popen, TimeoutExpired
 import sys
 from tempfile import TemporaryDirectory, TemporaryFile
 from time import monotonic
-from urllib.parse import parse_qs, urlencode, urlunsplit
+from urllib.parse import parse_qs, urlencode
 import wave
 
-from pet.exploration import read_url, within_website
+from pet.exploration import read_url, video_page, within_website
 from pet.exploration_pictures import PictureCandidate, _memory_jpeg
 
 
@@ -30,8 +30,6 @@ MEDIA_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
-BILIBILI_PATH = re.compile(r"/video/(?:BV[0-9A-Za-z]+|av[0-9]+)/?")
-YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 CUE = re.compile(
     r"(?m)^((?:\d+:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+((?:\d+:)?\d{2}:\d{2}[.,]\d{3})[^\n]*\n"
 )
@@ -58,31 +56,6 @@ class VideoMaterial:
     captions: list[TimedText] = field(default_factory=list)
     audio: list[AudioSample] = field(default_factory=list)
     status: str = ""
-
-
-def video_page(url):
-    """Return the extractor and canonical video page. Preserve a Bilibili part number."""
-    parts = read_url(url)
-    if not parts or parts.scheme != "https" or parts.port not in (None, 443):
-        return None
-    query = parse_qs(parts.query)
-    if parts.hostname in {"bilibili.com", "www.bilibili.com"} and BILIBILI_PATH.fullmatch(parts.path):
-        part = query.get("p", [""])[0]
-        query = {"p": part} if re.fullmatch(r"[1-9]\d{0,5}", part) and part != "1" else {}
-        path = parts.path.rstrip("/") + "/"
-        return "BiliBili", urlunsplit(("https", "www.bilibili.com", path, urlencode(query), ""))
-    if parts.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
-        if parts.hostname == "youtu.be":
-            video_id = parts.path.strip("/")
-        elif parts.path == "/watch":
-            video_id = query.get("v", [""])[0]
-        elif parts.path.startswith("/shorts/"):
-            video_id = parts.path.removeprefix("/shorts/").strip("/")
-        else:
-            return None
-        if YOUTUBE_ID.fullmatch(video_id):
-            return "youtube", "https://www.youtube.com/watch?" + urlencode({"v": video_id})
-    return None
 
 
 def playback_url(url, timestamp_ms):

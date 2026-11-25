@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 from ipaddress import ip_address
 from pathlib import Path
 import re
 import sqlite3
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 
 OPENAI_ENDPOINT = "https://api.openai.com/v1/responses"
@@ -16,8 +17,11 @@ DEEPSEEK_SEARCH_ENDPOINT = "https://api.deepseek.com/v1/tools/search"
 DEEPSEEK_MODEL = "deepseek-flash"
 BILIBILI_DOMAIN = "bilibili.com"
 DOMAIN_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+BILIBILI_PATH = re.compile(r"/video/(?:BV[0-9A-Za-z]+|av[0-9]+)/?")
+YOUTUBE_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 TOPICS = (
     "海鸥在海边是怎么找吃的", "水獭在水里做什么", "雨天的老街长什么样",
+    "周末出门能在早市吃到什么", "街边小吃摊怎么做招牌菜", "散步时会遇见哪些有意思的小事",
     "鸟是怎么选地方筑窝的", "窗边的光怎样影响照片", "潮水退下去能看到什么",
 )
 PENDING_OUTING_SECONDS = 260
@@ -69,6 +73,31 @@ def website_domain(value):
             or not all(DOMAIN_LABEL.fullmatch(label) for label in labels)):
         return None
     return host
+
+
+def video_page(url):
+    """Return the extractor and canonical video page. Preserve a Bilibili part number."""
+    parts = read_url(url)
+    if not parts or parts.scheme != "https" or parts.port not in (None, 443):
+        return None
+    query = parse_qs(parts.query)
+    if parts.hostname in {"bilibili.com", "www.bilibili.com"} and BILIBILI_PATH.fullmatch(parts.path):
+        part = query.get("p", [""])[0]
+        query = {"p": part} if re.fullmatch(r"[1-9]\d{0,5}", part) and part != "1" else {}
+        path = parts.path.rstrip("/") + "/"
+        return "BiliBili", urlunsplit(("https", "www.bilibili.com", path, urlencode(query), ""))
+    if parts.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        if parts.hostname == "youtu.be":
+            video_id = parts.path.strip("/")
+        elif parts.path == "/watch":
+            video_id = query.get("v", [""])[0]
+        elif parts.path.startswith("/shorts/"):
+            video_id = parts.path.removeprefix("/shorts/").strip("/")
+        else:
+            return None
+        if YOUTUBE_ID.fullmatch(video_id):
+            return "youtube", "https://www.youtube.com/watch?" + urlencode({"v": video_id})
+    return None
 
 
 def within_website(host, domain):
@@ -158,6 +187,8 @@ class Discovery:
     next_topic: str = ""
     picture: ExplorationPicture | None = None
     video: VideoMoment | None = None
+    liked_detail: str = ""
+    subject: str = ""
 
 
 @dataclass(frozen=True)
@@ -167,6 +198,8 @@ class Activity:
     interest: str
     previous_url: str = ""
     previous_reaction: str = ""
+    familiar_details: tuple[str, ...] = ()
+    from_memory: bool = False
 
 
 @dataclass(frozen=True)
@@ -176,10 +209,37 @@ class ExplorationSettings:
     invite_to_share: bool = True
 
 
-def choose_activity(history, capabilities, rng):
+def choose_activity(history, capabilities, rng, *, music=(), videos=(), tastes=()):
     """Revisit saved threads, with room for interests independent of the user."""
     if not capabilities:
         return None
+
+    # Weights decide where to look. Only a reaction to evidence can form her taste.
+    if music or videos or tastes:
+        pools = {"music": music, "video": videos, "taste": tastes}
+        odds = {"explore": 3}
+        if music:
+            odds["music"] = 2
+        if videos:
+            odds["video"] = 2
+        if tastes:
+            strongest = max(weight for _, weight in tastes)
+            odds["taste"] = min(6, 2 + strongest)
+        group = rng.choices(list(odds), list(odds.values()), k=1)[0]
+        if group != "explore":
+            options = pools[group]
+            recent_topics = {row["interest"] for row in history[:3]}
+            pool = [(topic, weight) for topic, weight in options if topic not in recent_topics] or options
+            topics, weights = zip(*pool)
+            subject = rng.choices(topics, weights, k=1)[0]
+            if group == "music":
+                topic = f"{subject} " + rng.choice(("现场演出", "创作故事", "翻唱"))
+            elif group == "video":
+                topic = f"{subject} 相关视频"
+            else:
+                topic = f"{subject} " + rng.choice(("其他例子", "相关故事", "不同场景"))
+            capability = "video" if group == "video" and "video" in capabilities else rng.choice(capabilities)
+            return Activity(topic, capability, subject, from_memory=True)
 
     recent_topics = {entry["topic"] for entry in history[:5]}
     recent_interests = {entry["interest"] for entry in history[:5]}
@@ -224,6 +284,15 @@ class ExplorationDiary:
                     observation TEXT, reaction TEXT, next_topic TEXT, shared INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS outings_by_day ON outings(local_day);
+                CREATE TABLE IF NOT EXISTS exploration_impressions (
+                    outing_id INTEGER PRIMARY KEY REFERENCES outings(id),
+                    source TEXT NOT NULL, liked_detail TEXT NOT NULL, is_video INTEGER NOT NULL, subject TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS video_diary_reads (
+                    outing_id INTEGER NOT NULL REFERENCES outings(id), day TEXT NOT NULL,
+                    visits INTEGER NOT NULL, seconds REAL NOT NULL, last_read REAL NOT NULL,
+                    PRIMARY KEY (day, outing_id)
+                );
                 CREATE TABLE IF NOT EXISTS exploration_pictures (
                     outing_id INTEGER PRIMARY KEY REFERENCES outings (id) ON DELETE CASCADE,
                     url TEXT NOT NULL, kind TEXT NOT NULL, reason TEXT NOT NULL, jpeg BLOB NOT NULL
@@ -330,7 +399,7 @@ class ExplorationDiary:
     def calls_on(self, day):
         return self.db.execute("SELECT count(*) FROM outings WHERE local_day = ?", (day,)).fetchone()[0]
 
-    def finish(self, outing_id, discovery=None, *, website=None):
+    def finish(self, outing_id, discovery=None, *, website=None, video_agent=False):
         with self.db:
             if discovery is None:
                 self.db.execute("UPDATE outings SET state = 'error' WHERE id = ?", (outing_id,))
@@ -340,6 +409,12 @@ class ExplorationDiary:
                         observation = ?, reaction = ?, next_topic = ? WHERE id = ?
                     """, (discovery.title, discovery.url, discovery.evidence_kind, discovery.observation,
                           discovery.reaction, discovery.next_topic, outing_id))
+                video = video_page(discovery.url)
+                source = video[1] if video else discovery.url.partition("#")[0]
+                is_video = bool(video or video_agent or discovery.video or discovery.evidence_kind == "transcript")
+                detail = discovery.liked_detail if discovery.evidence_kind != "metadata" or discovery.picture else ""
+                self.db.execute("INSERT OR REPLACE INTO exploration_impressions VALUES (?, ?, ?, ?, ?)",
+                                (outing_id, source, detail, is_video, discovery.subject))
                 if discovery.picture:
                     picture = discovery.picture
                     self.db.execute("""
@@ -362,10 +437,48 @@ class ExplorationDiary:
         return self.db.execute(
             """SELECT outings.*, EXISTS (
                    SELECT 1 FROM exploration_pictures WHERE outing_id = outings.id
-               ) AS has_picture, video.start_ms AS video_start_ms, video.end_ms AS video_end_ms,
+               ) AS has_picture, COALESCE(impression.is_video, (outings.capability = 'video' AND EXISTS (
+                       SELECT 1 FROM agents WHERE agents.name = outings.agent_name AND agents.provider IN ('dify', 'http')
+                   ))) AS is_video, video.start_ms AS video_start_ms, video.end_ms AS video_end_ms,
                    video.picture_ms AS picture_ms FROM outings LEFT JOIN exploration_video_moments AS video
-                   ON video.outing_id = outings.id WHERE state = 'done' ORDER BY outings.id DESC LIMIT ?""", (limit,)
+                   ON video.outing_id = outings.id LEFT JOIN exploration_impressions AS impression
+                   ON impression.outing_id = outings.id WHERE state = 'done' ORDER BY outings.id DESC LIMIT ?""", (limit,)
         ).fetchall()
+
+    def personal_tastes(self, today):
+        # Per detail, count a source once, even if it was opened again on another day.
+        rows = self.db.execute("""
+            WITH first_encounters AS (
+                SELECT i.liked_detail, i.source, MIN(o.local_day) AS day
+                FROM exploration_impressions i JOIN outings o ON o.id = i.outing_id
+                WHERE i.liked_detail != '' AND o.state = 'done' GROUP BY i.liked_detail, i.source
+            )
+            SELECT liked_detail, MIN(5, COUNT(DISTINCT day)) AS weight
+            FROM first_encounters WHERE day BETWEEN ? AND ?
+            GROUP BY liked_detail ORDER BY weight DESC, MAX(day) DESC LIMIT 24
+        """, ((today - timedelta(days=60)).isoformat(), (today - timedelta(days=1)).isoformat()))
+        return [(row[0], row[1]) for row in rows]
+
+    def record_video_read(self, entry_id, now, seconds):
+        if seconds < 3:
+            return
+        with self.db:
+            self.db.execute("""
+                INSERT INTO video_diary_reads VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(day, outing_id) DO UPDATE SET
+                    visits = MIN(6, visits + (excluded.last_read - last_read >= 600)),
+                    seconds = MIN(300, seconds + excluded.seconds), last_read = excluded.last_read
+            """, (entry_id, now.date().isoformat(), min(90, seconds), now.timestamp()))
+
+    def watched_topics(self, today):
+        rows = self.db.execute("""
+            SELECT COALESCE(NULLIF(i.subject, ''), o.title) AS topic, SUM(r.visits + r.seconds / 45.0) AS attention
+            FROM video_diary_reads r JOIN outings o ON o.id = r.outing_id
+            LEFT JOIN exploration_impressions i ON i.outing_id = o.id
+            WHERE r.day BETWEEN ? AND ? GROUP BY COALESCE(NULLIF(i.subject, ''), o.title)
+            ORDER BY attention DESC, MAX(r.last_read) DESC LIMIT 16
+        """, ((today - timedelta(days=20)).isoformat(), today.isoformat()))
+        return [(row[0][:80], row[1]) for row in rows]
 
     def picture(self, outing_id):
         row = self.db.execute(

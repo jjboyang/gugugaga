@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
 import os
+import random
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QToolTip
 
 from pet.exploration import (
     Activity, AgentConnection, BILIBILI_DOMAIN, DEEPSEEK_MODEL, DEEPSEEK_SEARCH_ENDPOINT, DIFY_ENDPOINT,
-    Discovery, ExplorationPicture, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT,
+    Discovery, ExplorationPicture, ExplorationSettings, ExplorationWebsite, OPENAI_ENDPOINT, choose_activity,
 )
 from pet.browsing_motion import HUM_START
 from pet.exploration_agents import (
@@ -269,6 +270,10 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.send_header("Location", "/video")
             self.end_headers()
             return
+        if self.path == "/strict-agent" and "persona" in received:
+            self.send_response(422)
+            self.end_headers()
+            return
         if self.path == "/vision-error":
             self.send_response(400)
             self.end_headers()
@@ -355,6 +360,85 @@ class ExplorationIntegrationTests(unittest.TestCase):
         while self.controller.outing is not None and time.monotonic() < stop:
             QTest.qWait(20)
         self.assertIsNone(self.controller.outing, "the exploration outing did not finish")
+
+    def test_music_topic_and_daughter_persona_reach_agent_with_legacy_fallback(self):
+        self.controller.save_connection(self.connection("strict-agent", "web"), None, "")
+        self.controller.music_topics = lambda _today: [("合唱", 1)]
+        # Select music, then the only song.
+        self.controller.rng.choices = Mock(side_effect=[["music"], ["合唱"]])
+        self.controller.start_exploring()
+        self.finish_round()
+        first, fallback = [body for _, body, _ in self.server.received]
+        self.assertIn("用户的女儿", first["persona"])
+        self.assertIn("调皮捣蛋", first["persona"])
+        self.assertIn("合唱", first["topic"])
+        self.assertEqual(fallback["topic"], first["topic"])
+        self.assertEqual(set(fallback), {"agent", "capability", "topic", "previous", "locale"})
+        self.assertEqual(len(self.controller.diary.recent()), 1)
+
+    def test_personal_taste_needs_evidence_and_independent_sources_across_days(self):
+        diary = self.controller.diary
+        agent = self.connection("web", "web")
+        today = datetime.now()
+        note = replace(Discovery(**WEB_RESULT), liked_detail="倒影里的灯光", next_topic="")
+        for days, url, kind in ((4, BILIBILI_URL, "transcript"), (3, BILIBILI_URL + "?t=14", "transcript"),
+                                (2, WEB_RESULT["url"], "article"), (1, LINKED_PAGE, "metadata")):
+            moment = today - timedelta(days=days)
+            outing_id = diary.reserve(agent, Activity("老街", "web", "老街"), moment.timestamp(),
+                                      moment.date().isoformat(), 4)
+            diary.finish(outing_id, replace(note, url=url, evidence_kind=kind))
+        self.assertEqual(diary.personal_tastes(today.date()), [("倒影里的灯光", 2)])
+        self.assertEqual(diary.personal_tastes((today - timedelta(days=4)).date()), [])
+        self.assertEqual(diary.personal_tastes((today + timedelta(days=61)).date()), [])
+        seeds = {"tastes": diary.personal_tastes(today.date()), "music": [("合唱", 1)], "videos": [("早市", 2)]}
+        activities = [choose_activity([], ["video", "web"], random.Random(seed), **seeds) for seed in range(100)]
+        self.assertTrue({"早市", "合唱", "倒影里的灯光"} < {a.interest for a in activities})
+        self.assertTrue(all(a.capability == "video" for a in activities if a.interest == "早市"))
+
+    def test_video_reading_across_different_entries_combines_by_subject(self):
+        diary = self.controller.diary
+        now = datetime.now()
+        agent = self.connection("video", "video")
+        for index, title in enumerate(("雨天逛早市", "老街早餐摊")):
+            outing = diary.reserve(agent, Activity(title, "video", title), now.timestamp(), now.date().isoformat(), 4)
+            result = VIDEO_RESULT | {"title": title, "url": f"https://example.org/video/{index}", "subject": "早市小吃"}
+            diary.finish(outing, parse_result(agent, json.dumps(result)), video_agent=True)
+            diary.record_video_read(outing, now, 45)
+        self.assertEqual(diary.watched_topics(now.date()), [("早市小吃", 4)])
+        self.assertEqual(diary.personal_tastes(now.date()), [])
+
+    def test_only_foreground_video_reading_changes_viewer_topics(self):
+        diary = self.controller.diary
+        now = datetime.now()
+        agent = self.connection("video", "video")
+        day = now.date().isoformat()
+        for result in (Discovery(**VIDEO_RESULT), Discovery(**WEB_RESULT)):
+            outing = diary.reserve(agent, Activity("测试", "video", "测试"), now.timestamp(), day, 4)
+            diary.finish(outing, result, video_agent=result.evidence_kind == "metadata")
+        self.controller.open_panel()
+        self.app.processEvents()
+        panel = self.controller.panel
+        self.assertIsNone(panel._read_since)  # The first note is an article.
+        panel.history.setCurrentRow(1)
+        self.assertIsNotNone(panel._read_since)
+        since = panel._read_since
+        self.controller._refresh()
+        self.assertEqual(panel._read_since, since)
+        panel.history.setCurrentRow(0)
+        self.assertEqual(diary.watched_topics(now.date()), [])  # Just passing through.
+        panel.history.setCurrentRow(1)
+        panel._read_since -= 500
+        panel.hide()
+        self.assertIsNone(panel._read_since)
+        self.assertEqual(diary.watched_topics(now.date()), [(VIDEO_RESULT["title"], 3)])
+        self.assertEqual(diary.personal_tastes(now.date()), [])
+        entry_id = diary.recent()[1]["id"]
+        later = now.replace(hour=12, minute=0)
+        diary.db.execute("UPDATE video_diary_reads SET last_read = ?", (later.timestamp(),))
+        diary.record_video_read(entry_id, later + timedelta(seconds=50), 9)
+        diary.record_video_read(entry_id, later + timedelta(minutes=20), 9)
+        row = diary.db.execute("SELECT visits, seconds FROM video_diary_reads").fetchone()
+        self.assertEqual(tuple(row), (2, 108))
 
     def test_reading_an_older_note_keeps_its_scroll_and_source_on_refresh(self):
         diary = self.controller.diary

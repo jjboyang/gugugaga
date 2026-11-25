@@ -92,11 +92,12 @@ class SystemCredentials:
 
 
 class ExplorationController(QObject):
-    def __init__(self, window, rig, *, is_active, diary_path=None, credentials=None):
+    def __init__(self, window, rig, *, is_active, diary_path=None, credentials=None, music_topics=None):
         super().__init__(window)
         self.window = window
         self.rig = rig
         self.is_active = is_active
+        self.music_topics = music_topics
         self.credentials = credentials if credentials is not None else SystemCredentials()
         self.rng = random.Random()
         self.panel = None
@@ -156,6 +157,7 @@ class ExplorationController(QObject):
         self.panel.show()
         self.panel.raise_()
         self.panel.activateWindow()
+        self.panel.begin_reading()
 
     def open_settings(self):
         if self.diary is None or self.settings_panel is not None:
@@ -258,7 +260,13 @@ class ExplorationController(QObject):
                     self._refresh()
                 return
             capabilities = sorted({agent.capability for agent in agents})
-            activity = choose_activity(self.diary.recent(), capabilities, self.rng)
+            if self.panel is not None and not automatic:
+                self.panel.finish_reading()
+            today = now.date()
+            tastes = self.diary.personal_tastes(today)
+            music = self.music_topics(today) if self.music_topics else ()
+            activity = choose_activity(self.diary.recent(), capabilities, self.rng, music=music,
+                                       videos=self.diary.watched_topics(today), tastes=tastes)
             matching = [agent for agent in agents if agent.capability == activity.capability]
             agent = self.rng.choice(matching)
             agent.validate()
@@ -267,8 +275,9 @@ class ExplorationController(QObject):
                 website = choose_website(self.diary.websites(), now.timestamp())
                 if website is None:
                     raise ValueError("先在「探索网站」里加一个网站，我再去逛。")
-                if website.kind == "learned" and website.topic:
-                    activity = replace(activity, topic=website.topic)
+                if website.kind == "learned" and website.topic and not activity.from_memory:
+                    activity = Activity(website.topic, activity.capability, website.topic)
+            activity = replace(activity, familiar_details=tuple(detail for detail, _ in tastes[:6]))
             key = self._read_key(agent)
             if key is None:
                 self._refresh()
@@ -370,6 +379,13 @@ class ExplorationController(QObject):
                 problem = f"这次没连上「{agent.name}」。"
         reply.deleteLater()
 
+        if (agent.provider == "http" and outing.stage == "agent" and status == 422 and not self.request_error):
+            # Older adapters sometimes enforce the original JSON schema.
+            body = build_request(agent, outing.activity)
+            for field in ("persona", "optional_result_fields", "familiar_details"):
+                body.pop(field, None)
+            self._post(agent.endpoint, body, stage="legacy_agent")
+            return
         if outing.stage == "transcribe" and not self.request_error:
             self._receive_transcript(problem)
             return
@@ -409,7 +425,8 @@ class ExplorationController(QObject):
         self.rig.set_exploring(False)
         self.buffer.clear()
         try:
-            remembered = self.diary.finish(outing.id, discovery, website=learned)
+            remembered = self.diary.finish(outing.id, discovery, website=learned,
+                                           video_agent=outing.agent.capability == "video" and not outing.website)
             if remembered:
                 self.status = f"我记住了 {learned.domain}，改天还想去看看。"
             elif discovery and discovery.picture:
@@ -463,6 +480,8 @@ class ExplorationController(QObject):
         outing.links = website_links(text, known_domains)
         page_lower = page.lower()
         source = video_page(outing.page_url)
+        if page and not source:
+            outing.results[0]["excerpt"] = " ".join(page.split())[:1800]
         if source or any(
                 hint in page_lower for hint in ("![", "<img", "<video", "og:image", "twitter:image")):
             self._start_media(page, outing.page_url, source)
@@ -665,6 +684,8 @@ class ExplorationController(QObject):
     def shutdown(self):
         self.closing = True
         self.timer.stop()
+        if self.panel is not None:
+            self.panel.finish_reading()
         self._cancel_invitation()
         if self.outing is not None:
             self._cancel("桌宠已退出。")

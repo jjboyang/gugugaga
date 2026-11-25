@@ -82,10 +82,10 @@ def main():
     window.pomodoro = pomodoro
     app.aboutToQuit.connect(pomodoro.shutdown)
     work = WorkMode(window, rig)
-    exploration = ExplorationController(
-        window, rig, is_active=lambda: selected_character[0] == "dafeiyu",
-    )
     music = MusicMemory(window, rig)
+    exploration = ExplorationController(
+        window, rig, is_active=lambda: selected_character[0] == "dafeiyu", music_topics=music.exploration_topics,
+    )
     app.aboutToQuit.connect(exploration.shutdown)
     app.aboutToQuit.connect(music.shutdown)
     app.aboutToQuit.connect(work.stop)

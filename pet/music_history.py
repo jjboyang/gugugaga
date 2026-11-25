@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from queue import Empty, SimpleQueue
 import random
+import re
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
@@ -39,6 +40,9 @@ class ListeningHistory:
         self.connection.executescript("""
             CREATE TABLE IF NOT EXISTS music_memory (id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL);
             INSERT OR IGNORE INTO music_memory (id, enabled) VALUES (1, 0);
+            CREATE TABLE IF NOT EXISTS music_exploration (
+                id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS music_tracks (
                 track_key TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL, melody TEXT
             );
@@ -55,6 +59,35 @@ class ListeningHistory:
     def set_enabled(self, enabled):
         with self.connection:
             self.connection.execute("UPDATE music_memory SET enabled = ? WHERE id = 1", (bool(enabled),))
+
+    def exploration_enabled(self):
+        return bool(self.connection.execute("SELECT 1 FROM music_exploration WHERE enabled = 1").fetchone())
+
+    def set_exploration_enabled(self, enabled):
+        with self.connection:
+            self.connection.execute("INSERT OR REPLACE INTO music_exploration VALUES (1, ?)", (enabled,))
+
+    def exploration_topics(self, today):
+        if not self.enabled():
+            return []
+        oldest = (today - timedelta(days=_RECENT_DAYS - 1)).isoformat()
+        rows = self.connection.execute("""
+            SELECT t.title, t.artist, COUNT(*) + SUM(MIN(d.seconds, 300)) / 180.0 AS weight
+            FROM music_days d JOIN music_tracks t USING (track_key)
+            WHERE d.day BETWEEN ? AND ? AND d.seconds >= ? GROUP BY t.track_key
+            ORDER BY weight DESC, MAX(d.last_seen) DESC LIMIT 16
+        """, (oldest, today.isoformat(), _MIN_LISTEN_SECONDS))
+        if self.exploration_enabled():
+            return [(" ".join(filter(None, (title[:60], artist[:40]))), weight) for title, artist, weight in rows]
+        # Local-only listening memory contributes broad subjects, never track identifiers.
+        formats = ((r"现场|演唱会|\blive\b", "音乐现场"), (r"钢琴|\bpiano\b", "钢琴曲"),
+                   (r"合唱|\bchoir\b", "合唱"), (r"原声|配乐|\bost\b", "影视原声"),
+                   (r"不插电|\bacoustic\b", "不插电演奏"), (r"翻唱|\bcover\b", "歌曲翻唱"))
+        subjects = {}
+        for title, _, weight in rows:
+            subject = next((label for pattern, label in formats if re.search(pattern, title, re.I)), "歌曲")
+            subjects[subject] = subjects.get(subject, 0) + weight
+        return list(subjects.items())
 
     def add_listen(self, track, day, seconds, last_seen):
         with self.connection:
@@ -189,6 +222,12 @@ class MusicMemory(QObject):
             self.rig.refresh_browsing_hum()
         self._refresh()
 
+    def exploration_topics(self, today):
+        try:
+            return self.history.exploration_topics(today) if self.enabled and self.history else []
+        except sqlite3.Error:
+            return []
+
     def _sample_target(self, now):
         day = datetime.now().date().isoformat()
         if day != self.attempt_day:
@@ -321,7 +360,11 @@ class MusicHistoryPanel(QDialog):
         self.toggle = Toggle("记住我听过的音乐，用来哼唱")
         self.toggle.toggled.connect(memory.set_enabled)
         layout.addWidget(self.toggle)
-        layout.addWidget(label("开启后读取播放器曲名，并短暂分析播放输出或本地音乐文件。曲名、歌手和提取的旋律留在本机。", "muted", wrap=True))
+        layout.addWidget(label("开启后在本机记录曲名和歌手，短暂分析播放输出或本地音乐文件以提取旋律。", "muted", wrap=True))
+        self.explore_music = Toggle("探索时用具体歌名和歌手搜索")
+        self.explore_music.toggled.connect(self._set_explore_music)
+        layout.addWidget(self.explore_music)
+        layout.addWidget(label("选中一首歌去探索时，会用它的曲名和歌手向探索服务搜索。", "muted", wrap=True))
         self.qq_music_setup = label("Mac 上识别 QQ 音乐需先在终端运行 brew install media-control。", "muted", wrap=True)
         self.qq_music_setup.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.qq_music_setup)
@@ -339,6 +382,13 @@ class MusicHistoryPanel(QDialog):
         self._today = None
         self.day.currentTextChanged.connect(self.refresh)
 
+    def _set_explore_music(self, enabled):
+        try:
+            self.memory.history.set_exploration_enabled(enabled)
+        except sqlite3.Error:
+            self.memory.error = "暂时无法保存听歌设置。"
+        self.refresh()
+
     def refresh(self):
         memory = self.memory
         self.toggle.blockSignals(True)
@@ -351,6 +401,11 @@ class MusicHistoryPanel(QDialog):
         day = selected if selected and selected != self._today else today
         self._today = today
         try:
+            self.explore_music.setEnabled(memory.enabled)
+            explore_tracks = bool(memory.history and memory.history.exploration_enabled())
+            self.explore_music.blockSignals(True)
+            self.explore_music.setChecked(explore_tracks)
+            self.explore_music.blockSignals(False)
             stored_days = memory.history.days() if memory.history is not None else []
             days = list(dict.fromkeys([today, *stored_days]))
             if day not in days:
