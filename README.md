@@ -156,6 +156,8 @@ python scripts/preview-pomodoro.py --export-dir preview/pomodoro
 
 Windows 10 1809 及以上通过系统媒体会话读取曲名。在默认播放设备支持回录时，可从几秒系统播放输出中提取旋律。Linux 需要 `playerctl` 读取曲名，可以用 FFmpeg 读播放器公开的本地音频文件，也可以配合 `pactl` 读取默认输出。macOS 支持「音乐」和 Spotify 桌面版的曲目信息，首次使用可能需要允许自动化访问。macOS 的旋律提取适用于「音乐」提供的本地音频文件，需要 FFmpeg。
 
+macOS 上使用 QQ 音乐时，请先运行 `brew install media-control`。大肥鱼会通过系统「正在播放」记录 QQ 音乐的歌名和歌手。播放歌曲后，可以在控制中心的「正在播放」里确认 QQ 音乐是否已向系统提供曲目信息。
+
 ### 从外部脚本发起提问
 
 ```bash

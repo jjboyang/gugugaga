@@ -2,10 +2,12 @@
 import asyncio
 from datetime import datetime, timedelta
 from io import BytesIO
+import json
 import math
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -23,7 +25,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 
 from pet.music_history import MusicMemory, Observation, _observe
 from pet.music_melody import SAMPLE_RATE, extract_phrase, hum_wave
-from pet.music_sources import PlayingTrack, _linux_track, _windows_track, sample_playback
+from pet.music_sources import PlayingTrack, _linux_track, _mac_track, _windows_track, read_playback, sample_playback
 from pet.rig_animator import RigAnimator
 from pet.window import PetWindow
 
@@ -85,6 +87,37 @@ class MelodyTests(unittest.TestCase):
         self.assertEqual((playing.title, playing.artist, playing.position), ("晚上的歌", "歌手", 12))
         self.assertEqual(playing.local_file, Path("/music/A B.flac"))
         self.assertFalse(playing.loopback)
+
+    def test_mac_reads_playing_qq_music_even_when_finder_omits_homebrew_from_path(self):
+        bundle = "com.tencent.QQMusicMac"
+        playing = {"bundleIdentifier": bundle, "title": "海边", "artist": "歌手", "playing": True, "elapsedTime": 7.25}
+        sessions = [playing | {"playing": False}, playing | {"isAdvertisement": True},
+                    playing | {"bundleIdentifier": "com.apple.Safari"}, playing]
+        binary = "/opt/homebrew/bin/media-control"
+        with patch("pet.music_sources.sys", SimpleNamespace(platform="darwin")), \
+                patch("pet.music_sources.shutil.which", side_effect=(None, binary)) as lookup, \
+                patch("pet.music_sources._command", return_value=json.dumps(sessions)) as command:
+            track = read_playback()
+        self.assertEqual(track, PlayingTrack("海边", "歌手", bundle, position=7.25, loopback=False))
+        self.assertEqual(lookup.call_count, 2)
+        command.assert_called_once_with([binary, "get", f"--bundle-id={bundle}", "--no-artwork"])
+
+    def test_mac_falls_back_to_apple_music_when_qq_music_is_unavailable(self):
+        local = "\x1f".join(("本地歌曲", "作者", "11", "/music/track.m4a"))
+        binary = "/usr/local/bin/media-control"
+        paused = '[{"bundleIdentifier":"com.tencent.QQMusicMac","title":"已暂停","playing":false}]'
+        for available, responses in (
+            (None, [local]),
+            (binary, [paused, local]),
+            (binary, ["bad json", local]),
+            (binary, [subprocess.TimeoutExpired("media-control", 3), local]),
+        ):
+            with self.subTest(response=responses[0]), \
+                    patch("pet.music_sources.shutil.which", return_value=available), \
+                    patch("pet.music_sources._command", side_effect=responses):
+                track = _mac_track()
+            self.assertEqual(track, PlayingTrack("本地歌曲", "作者", "com.apple.Music", 11,
+                                                 Path("/music/track.m4a"), loopback=False))
 
     def test_windows_ignores_a_foreground_video_and_skips_a_mixed_loopback(self):
         def session(name, kind):
@@ -165,6 +198,17 @@ class MusicMemoryTests(unittest.TestCase):
         self.memory.panel.toggle.click()
         self.assertFalse(self.memory.history.enabled())
         self.assertFalse(self.memory.timer.isActive())
+
+    def test_mac_listening_panel_hints_at_qq_music_setup_when_needed(self):
+        with patch("pet.music_history.sys", SimpleNamespace(platform="darwin")), \
+                patch("pet.music_history.mac_media_control_path", return_value=None) as lookup:
+            self.memory.open_panel()
+            self.assertFalse(self.memory.panel.qq_music_setup.isVisible())
+            self.enable()
+            self.assertTrue(self.memory.panel.qq_music_setup.isVisible())
+            lookup.return_value = "/usr/local/bin/media-control"
+            self.memory.panel.refresh()
+            self.assertFalse(self.memory.panel.qq_music_setup.isVisible())
 
     def test_day_rollover_deduplicates_plays_and_filters_a_quick_skip(self):
         track = PlayingTrack("晚上的歌", "歌手", "player")

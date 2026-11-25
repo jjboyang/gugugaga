@@ -22,6 +22,7 @@ from pet.music_melody import SAMPLE_RATE, SAMPLE_SECONDS
 _FIELD_SEPARATOR = "\x1f"
 _AUDIO_EXTENSIONS = {".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".wma"}
 _HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_QQ_MUSIC_BUNDLE = "com.tencent.QQMusicMac"
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,41 @@ return ""
 """
 
 
+def mac_media_control_path():
+    # Finder launches may omit Homebrew from PATH, on both Apple Silicon and Intel.
+    return shutil.which("media-control") or shutil.which("media-control", path="/opt/homebrew/bin:/usr/local/bin")
+
+
+def _mac_qq_music_track():
+    command = mac_media_control_path()
+    if not command:
+        return None
+    try:
+        sessions = json.loads(_command([command, "get", f"--bundle-id={_QQ_MUSIC_BUNDLE}", "--no-artwork"]))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(sessions, list):
+        return None
+
+    for session in sessions:
+        if not isinstance(session, dict) or session.get("playing") is not True or session.get("isAdvertisement") is True:
+            continue
+        if _QQ_MUSIC_BUNDLE not in (session.get("bundleIdentifier"), session.get("parentApplicationBundleIdentifier")):
+            continue
+        title, artist = session.get("title"), session.get("artist")
+        if not isinstance(title, str):
+            continue
+        track = _track(title, artist if isinstance(artist, str) else "", _QQ_MUSIC_BUNDLE,
+                       position=session.get("elapsedTime"), loopback=False, music=True)
+        if track is not None:
+            return track
+    return None
+
+
 def _mac_track():
+    qq_music = _mac_qq_music_track()
+    if qq_music is not None:
+        return qq_music
     for app_id, local_file in (
         ("com.apple.Music", 'try\nset audioPath to POSIX path of (location of current track as alias)\nend try'),
         ("com.spotify.client", ""),

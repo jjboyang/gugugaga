@@ -10,6 +10,7 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 import random
 import sqlite3
+import sys
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 import time
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import QComboBox, QDialog, QHBoxLayout
 
 from pet.exploration_ui import Toggle, add_card, card_list, label, themed_layout
 from pet.music_melody import PitchPhrase, extract_phrase, hum_wave
-from pet.music_sources import PlayingTrack, read_playback, sample_playback
+from pet.music_sources import PlayingTrack, mac_media_control_path, read_playback, sample_playback
 
 
 _POLL_SECONDS = 4
@@ -321,6 +322,9 @@ class MusicHistoryPanel(QDialog):
         self.toggle.toggled.connect(memory.set_enabled)
         layout.addWidget(self.toggle)
         layout.addWidget(label("开启后读取播放器曲名，并短暂分析播放输出或本地音乐文件。曲名、歌手和提取的旋律留在本机。", "muted", wrap=True))
+        self.qq_music_setup = label("Mac 上识别 QQ 音乐需先在终端运行 brew install media-control。", "muted", wrap=True)
+        self.qq_music_setup.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.qq_music_setup)
         self.day = QComboBox()
         self.day.setAccessibleName("听歌日期")
         dates = QHBoxLayout()
@@ -341,6 +345,7 @@ class MusicHistoryPanel(QDialog):
         self.toggle.setEnabled(memory.history is not None)
         self.toggle.setChecked(memory.enabled)
         self.toggle.blockSignals(False)
+        self.qq_music_setup.setVisible(sys.platform == "darwin" and memory.enabled and mac_media_control_path() is None)
         today = datetime.now().date().isoformat()
         selected = self.day.currentText()
         day = selected if selected and selected != self._today else today
