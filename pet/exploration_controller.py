@@ -265,8 +265,10 @@ class ExplorationController(QObject):
             today = now.date()
             tastes = self.diary.personal_tastes(today)
             music = self.music_topics(today) if self.music_topics else ()
-            activity = choose_activity(self.diary.recent(), capabilities, self.rng, music=music,
-                                       videos=self.diary.watched_topics(today), tastes=tastes)
+            activity = self.diary.question_activity(capabilities)
+            if activity is None:
+                activity = choose_activity(self.diary.recent(), capabilities, self.rng, music=music,
+                                           videos=self.diary.watched_topics(today), tastes=tastes)
             matching = [agent for agent in agents if agent.capability == activity.capability]
             agent = self.rng.choice(matching)
             agent.validate()
@@ -382,8 +384,9 @@ class ExplorationController(QObject):
         if (agent.provider == "http" and outing.stage == "agent" and status == 422 and not self.request_error):
             # Older adapters sometimes enforce the original JSON schema.
             body = build_request(agent, outing.activity)
-            for field in ("persona", "optional_result_fields", "familiar_details"):
+            for field in ("persona", "optional_result_fields", "familiar_details", "user_question"):
                 body.pop(field, None)
+            body["previous"].pop("observation", None)
             self._post(agent.endpoint, body, stage="legacy_agent")
             return
         if outing.stage == "transcribe" and not self.request_error:
@@ -426,6 +429,7 @@ class ExplorationController(QObject):
         self.buffer.clear()
         try:
             remembered = self.diary.finish(outing.id, discovery, website=learned,
+                                           question_id=outing.activity.question_id,
                                            video_agent=outing.agent.capability == "video" and not outing.website)
             if remembered:
                 self.status = f"我记住了 {learned.domain}，改天还想去看看。"
@@ -614,27 +618,47 @@ class ExplorationController(QObject):
             return
 
         image = QImage.fromData(picture.jpeg, "JPEG") if picture else QImage()
+        answer = f"上次你问「{entry['question']}」\n{entry['answer']}" if entry["answer"] else ""
         if not image.isNull():
             def reveal():
-                self._share_invited_note(entry["id"], picture.reason, image)
+                self._share_invited_note(entry["id"], answer or picture.reason, image)
 
-            if self.rig.social.show_exploration_photo(image, reveal):
+            style = "eager" if answer or entry["familiar"] else (
+                "peek" if self.rng.random() < 0.30 else "normal")
+            if self.rig.social.show_exploration_photo(image, reveal, style):
                 return
 
         reaction, observation = entry["reaction"], entry["observation"]
         text = reaction if reaction == observation else "\n".join(filter(None, (reaction, observation)))
-        self._share_invited_note(entry["id"], text, QImage())
+        self._share_invited_note(entry["id"], answer or text, QImage())
 
     def _share_invited_note(self, entry_id, text, image):
         if (self.closing or not self.is_active() or self.diary is None or not self.window.isVisible()
                 or (self.panel is not None and self.panel.isVisible())):
             return
         try:
+            pending = self.diary.pending_question()
+            previous_id = pending["id"] if pending else None
             if self.diary.mark_shared(entry_id):
-                self.window.share_exploration_note(text, image)
+                self.window.share_exploration_note(
+                    text, image, on_question=lambda question: self._remember_question(entry_id, question, previous_id),
+                    replacing=pending is not None,
+                )
         except sqlite3.Error:
             self.status = DIARY_ERROR
             self._refresh()
+
+    def _remember_question(self, source_id, question, previous_id):
+        if self.closing or not self.is_active() or self.diary is None:
+            return "等我回来再问我吧。"
+        try:
+            self.diary.remember_question(source_id, question, previous_id)
+        except ValueError as error:
+            return str(error)
+        except sqlite3.Error:
+            return DIARY_ERROR
+        self._touched()
+        return ""
 
     def _cancel_invitation(self):
         if self.invitation is not None:

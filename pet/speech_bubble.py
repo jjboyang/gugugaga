@@ -7,7 +7,9 @@ import sys
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QPushButton, QWidget
+from PySide6.QtWidgets import QLineEdit, QPushButton, QWidget
+
+from pet.exploration import QUESTION_LIMIT
 
 
 @dataclass(frozen=True)
@@ -137,7 +139,9 @@ class SpeechBubble(QWidget):
         gap_anchor = pet_geometry.top() + round(pet_geometry.height() * 0.18)
         x = pet_geometry.center().x() - self.width() // 2
         y = gap_anchor - self.height()
-        self.tail_on_top = y < available.top() + 4
+        room_above = gap_anchor - available.top() - 4
+        room_below = available.bottom() - pet_geometry.bottom() - 5
+        self.tail_on_top = self.height() > room_above and room_below > room_above
         if self.tail_on_top:
             y = pet_geometry.bottom() + 2
         x = max(available.left() + 4, min(x, available.right() - self.width() - 3))
@@ -282,15 +286,81 @@ class DiscoveryBubble(SpeechBubble):
     TEXT_FLAGS = Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap | Qt.TextWrapAnywhere
     INSET = 12
 
-    def __init__(self, text, image, pet_size, parent):
+    def __init__(self, text, image, pet_size, parent, *, on_question=None, replacing=False):
         hold_ms = max(11_000 if not image.isNull() else 8_000, min(28_000, 4_000 + len(text) * 80))
-        super().__init__(Reply(text, "whale"), pet_size=pet_size, parent=parent, hold_ms=hold_ms)
+        label = ("换个问题…" if replacing else "我还想知道…") if on_question else ""
+        super().__init__(Reply(text, "whale"), pet_size=pet_size, parent=parent, hold_ms=hold_ms,
+                         answer=label, answer_accessible_name=label)
+        self._on_question = on_question
+        self.question_edit = None
+        if self.answer_button:
+            self.answer_button.clicked.disconnect(self.accept_answer)
+            self.answer_button.clicked.connect(self._edit_or_send)
         self.image = image
         self._font.setPixelSize(min(16, self._font.pixelSize()))
         self._font.setWeight(QFont.Medium)
+        if self.answer_button:
+            action_font = QFont(self._font)
+            action_font.setPixelSize(14)
+            self.answer_button.setFont(action_font)
+            self.answer_button.adjustSize()
         self._available_size = QSize()
         self._image_size = QSize()
         self.setAccessibleName(text or "大肥鱼分享的图片")
+
+    def _edit_or_send(self):
+        if self._closing:
+            return
+        if self.question_edit is not None:
+            question = self.question_edit.text().strip()
+            if question:
+                error = self._on_question(question)
+                if error:
+                    self.reply = Reply(error, "whale")
+                    self.setAccessibleName(error)
+                    self._available_size = QSize()
+                    self.parentWidget()._position_speech_bubble()
+                    self.question_edit.setFocus()
+                else:
+                    self.parentWidget().say("记住啦，我下次逛的时候找找！", "whale")
+            return
+        self.question_edit = QLineEdit(self)
+        self.question_edit.setMaxLength(QUESTION_LIMIT)
+        self.question_edit.setFont(self.answer_button.font())
+        self.question_edit.setPlaceholderText("想问她什么？")
+        self.question_edit.setAccessibleName("我的追问")
+        self.question_edit.setStyleSheet("QLineEdit { background:white; color:#284d7a; border:1px solid #afcde6;"
+                                        " border-radius:7px; padding:2px 6px; }")
+        self.question_edit.returnPressed.connect(self._edit_or_send)
+        self.cancel_button = QPushButton("×", self)
+        self.cancel_button.setAccessibleName("取消追问")
+        self.cancel_button.setFlat(True)
+        self.cancel_button.setStyleSheet("color:#426280; font-size:16px")
+        self.cancel_button.clicked.connect(self.close)
+        self.answer_button.setText("记下")
+        self.answer_button.adjustSize()
+        self.answer_button.setEnabled(False)
+        self.question_edit.textChanged.connect(lambda text: self.answer_button.setEnabled(bool(text.strip())))
+        # Only an explicit click gives the bubble keyboard focus.
+        self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, False)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self._available_size = QSize()
+        self.parentWidget()._position_speech_bubble()
+        self.show()
+        self.question_edit.show()
+        self.cancel_button.show()
+        self.activateWindow()
+        self.question_edit.setFocus()
+        self._hold_timer.stop()
+
+    def keyPressEvent(self, event):
+        if self.question_edit is not None and event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def _footer_height(self):
+        return self.answer_button.height() + 7 if self.answer_button else 0
 
     def place(self, pet_geometry, available, avoid=None):
         bounds = available.size()
@@ -298,29 +368,41 @@ class DiscoveryBubble(SpeechBubble):
             self._available_size = bounds
             self._fit_content(bounds)
         super().place(pet_geometry, available, avoid)
+        if self.answer_button:
+            right = self.width() - 8 - self.INSET
+            bottom = self.height() - (8 if self.tail_on_top else 18) - self.INSET
+            button = self.answer_button
+            if self.question_edit is not None:
+                self.cancel_button.setGeometry(right - 22, bottom - button.height(), 22, button.height())
+                right -= 24
+            button.move(right - button.width(), bottom - button.height())
+            if self.question_edit is not None:
+                left = 8 + self.INSET
+                self.question_edit.setGeometry(left, button.y(), max(1, button.x() - left - 5), button.height())
 
     def _fit_content(self, bounds):
         metrics = QFontMetrics(self._font)
         text = self.reply.text
         line_width = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=0)
-        preferred_width = max(150, line_width + 40)
+        preferred_width = max(284 if self.question_edit is not None else 150, line_width + 40)
         if not self.image.isNull():
             preferred_width = max(preferred_width, 284)
         max_width = 420 if len(text) > 240 else 344
         width = min(preferred_width, max_width, bounds.width() - 8)
         content_width = max(1, width - 16 - 2 * self.INSET)
         text_height = metrics.boundingRect(QRect(0, 0, content_width, 0), self.TEXT_FLAGS, text).height() if text else 0
-        content_height = max(1, bounds.height() - 8 - 24 - 2 * self.INSET)
+        footer = self._footer_height()
+        content_height = max(1, bounds.height() - 8 - 24 - 2 * self.INSET - footer)
         self._image_size = QSize(0, 0)
         if not self.image.isNull():
             image_height = min(176, max(1, content_height - text_height - (8 if text else 0)))
             self._image_size = self.image.size().scaled(content_width, image_height, Qt.KeepAspectRatio)
         spacing = 8 if text and not self._image_size.isEmpty() else 0
         height = min(content_height, text_height + self._image_size.height() + spacing)
-        self.setFixedSize(width, height + 24 + 2 * self.INSET)
+        self.setFixedSize(width, height + 24 + 2 * self.INSET + footer)
 
     def _paint_content(self, painter, body, accent, ink):
-        content = body.adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET)
+        content = body.adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET - self._footer_height())
         painter.setClipRect(content)
         if not self._image_size.isEmpty():
             image_rect = QRectF(content.center().x() - self._image_size.width() / 2, content.top(),

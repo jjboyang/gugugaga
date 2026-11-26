@@ -26,6 +26,7 @@ TOPICS = (
 )
 PENDING_OUTING_SECONDS = 260
 DAILY_LIMIT_REACHED = "今天的探索次数用完啦。"
+QUESTION_LIMIT = 80
 
 
 def read_url(value):
@@ -189,6 +190,7 @@ class Discovery:
     video: VideoMoment | None = None
     liked_detail: str = ""
     subject: str = ""
+    followup_answer: str = ""
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,9 @@ class Activity:
     previous_reaction: str = ""
     familiar_details: tuple[str, ...] = ()
     from_memory: bool = False
+    question_id: int | None = None
+    question: str = ""
+    previous_observation: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,6 +315,12 @@ class ExplorationDiary:
                 CREATE TABLE IF NOT EXISTS exploration_invitations (
                     local_day TEXT PRIMARY KEY, attempts INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS shared_questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL REFERENCES outings(id),
+                    question TEXT NOT NULL, last_attempt INTEGER REFERENCES outings(id),
+                    answer_id INTEGER UNIQUE REFERENCES outings(id), answer TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS one_open_question ON shared_questions((1)) WHERE answer_id IS NULL;
             """)
         except sqlite3.Error:
             self.db.close()
@@ -391,15 +402,61 @@ class ExplorationDiary:
                 UPDATE exploration_websites SET last_visited = ? WHERE domain = ? AND kind != 'removed'
                 """, (now, website.domain)).rowcount:
                 raise ValueError("这个网站已移除，选一个别的网站再去逛吧。")
-            return self.db.execute("""
+            outing_id = self.db.execute("""
                 INSERT INTO outings (local_day, started, agent_name, topic, capability, interest, state)
                 VALUES (?, ?, ?, ?, ?, ?, 'pending')
                 """, (day, now, agent.name, activity.topic, activity.capability, activity.interest)).lastrowid
+            if activity.question_id is not None:
+                if not self.db.execute("""
+                    UPDATE shared_questions SET last_attempt = ? WHERE id = ? AND answer_id IS NULL
+                    """, (outing_id, activity.question_id)).rowcount:
+                    raise ValueError("你刚刚换了个问题，我下次再去找。")
+            return outing_id
+
+    def pending_question(self):
+        return self.db.execute("""
+            SELECT q.*, o.title, o.url, o.reaction, o.observation, o.interest, o.capability
+            FROM shared_questions q JOIN outings o ON o.id = q.source_id WHERE q.answer_id IS NULL
+        """).fetchone()
+
+    def remember_question(self, source_id, question, previous_id=None):
+        question = " ".join(question.split())
+        if not 1 <= len(question) <= QUESTION_LIMIT:
+            raise ValueError(f"写 1 到 {QUESTION_LIMIT} 个字就好。")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            pending = self.pending_question()
+            if pending:
+                if pending["id"] != previous_id:
+                    raise ValueError("已经记下另一个问题啦。")
+                self.db.execute("DELETE FROM shared_questions WHERE id = ?", (previous_id,))
+            if not self.db.execute("""
+                INSERT INTO shared_questions(source_id, question)
+                SELECT id, ? FROM outings WHERE id = ? AND state = 'done' AND shared = 1
+            """, (question, source_id)).rowcount:
+                raise ValueError("这条分享已经找不到了。")
+
+    def question_activity(self, capabilities):
+        pending = self.pending_question()
+        if pending is None:
+            return None
+        # Leave at least one outing for her own interests between two attempts.
+        if pending["last_attempt"] is not None and not self.db.execute(
+                "SELECT 1 FROM outings WHERE id > ? LIMIT 1", (pending["last_attempt"],)).fetchone():
+            return None
+        capability = pending["capability"] if pending["capability"] in capabilities else capabilities[0]
+        question = pending["question"]
+        subject = pending["interest"][:20]
+        title = pending["title"][:24]
+        context = title if subject in title else f"{subject} {title}"
+        return Activity(f"{context} {question}", capability, pending["interest"],
+                        pending["url"], pending["reaction"], from_memory=True,
+                        question_id=pending["id"], question=question, previous_observation=pending["observation"])
 
     def calls_on(self, day):
         return self.db.execute("SELECT count(*) FROM outings WHERE local_day = ?", (day,)).fetchone()[0]
 
-    def finish(self, outing_id, discovery=None, *, website=None, video_agent=False):
+    def finish(self, outing_id, discovery=None, *, website=None, video_agent=False, question_id=None):
         with self.db:
             if discovery is None:
                 self.db.execute("UPDATE outings SET state = 'error' WHERE id = ?", (outing_id,))
@@ -425,6 +482,17 @@ class ExplorationDiary:
                     self.db.execute("""
                         INSERT OR REPLACE INTO exploration_video_moments VALUES (?, ?, ?, ?)
                         """, (outing_id, video.start_ms, video.end_ms, video.picture_ms))
+                if question_id is not None:
+                    answered = False
+                    has_figure = discovery.picture and discovery.picture.kind in {"figure", "frame"}
+                    if discovery.followup_answer and (discovery.evidence_kind != "metadata" or has_figure):
+                        answered = self.db.execute("""
+                            UPDATE shared_questions SET answer = ?, answer_id = ?
+                            WHERE id = ? AND last_attempt = ? AND answer_id IS NULL
+                        """, (discovery.followup_answer, outing_id, question_id, outing_id)).rowcount
+                    if not answered:
+                        # Still a diary entry, but there is no answer to bring back.
+                        self.db.execute("UPDATE outings SET shared = 1 WHERE id = ?", (outing_id,))
                 if website:
                     inserted = self.db.execute("""
                         INSERT OR IGNORE INTO exploration_websites (domain, kind, link_url, source_url, topic)
@@ -487,9 +555,16 @@ class ExplorationDiary:
         return ExplorationPicture(**dict(row)) if row is not None else None
 
     def latest_unshared(self):
-        return self.db.execute(
-            "SELECT * FROM outings WHERE state = 'done' AND shared = 0 ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        return self.db.execute("""
+            SELECT o.*, q.question, q.answer, EXISTS (
+                SELECT 1 FROM exploration_impressions past JOIN outings prev ON prev.id = past.outing_id
+                WHERE i.liked_detail != '' AND past.liked_detail = i.liked_detail AND past.source != i.source
+                    AND prev.local_day < o.local_day
+            ) AS familiar
+            FROM outings o LEFT JOIN shared_questions q ON q.answer_id = o.id
+            LEFT JOIN exploration_impressions i ON i.outing_id = o.id
+            WHERE o.state = 'done' AND o.shared = 0 ORDER BY (q.id IS NOT NULL) DESC, o.id DESC LIMIT 1
+        """).fetchone()
 
     def mark_shared(self, outing_id):
         with self.db:
@@ -497,8 +572,8 @@ class ExplorationDiary:
                 "UPDATE outings SET shared = 1 WHERE id = ? AND state = 'done' AND shared = 0", (outing_id,)
             ).rowcount:
                 return False
-            self.db.execute("UPDATE outings SET shared = 1 WHERE id < ? AND state = 'done' AND shared = 0",
-                            (outing_id,))
+            self.db.execute("""UPDATE outings SET shared = 1 WHERE id < ? AND state = 'done' AND shared = 0
+                AND id NOT IN (SELECT answer_id FROM shared_questions WHERE answer_id IS NOT NULL)""", (outing_id,))
             return True
 
     def reserve_invitation(self, day, limit):

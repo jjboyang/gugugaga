@@ -453,9 +453,10 @@ class PetWindow(QWidget):
             on_answer=on_reply, answer_on_pet_tap=True,
         )
 
-    def share_exploration_note(self, text, image):
+    def share_exploration_note(self, text, image, *, on_question=None, replacing=False):
         self._dismiss_speech_bubble()
-        return self._present_speech_bubble(DiscoveryBubble(text, image, self._pet_size, self))
+        popup = DiscoveryBubble(text, image, self._pet_size, self, on_question=on_question, replacing=replacing)
+        return self._present_speech_bubble(popup)
 
     def _show_speech_bubble(self, reply, *, answer="", hold_ms=None, on_answer=None, answer_on_pet_tap=False):
         """Replace the previous reply without an old timer hiding the new one."""

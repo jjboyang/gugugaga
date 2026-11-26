@@ -63,6 +63,7 @@ class SocialGestures:
         self.pointer_food.setStyleSheet("background: transparent")
         self.prompt = None
         self.photo = None
+        self.photo_style = "normal"
         self._reveal_photo = None
         self.kind = ""
         self.age = 0.0
@@ -120,10 +121,11 @@ class SocialGestures:
     def answer_joke(self):
         self._start("laugh")
 
-    def show_exploration_photo(self, image, on_reveal):
+    def show_exploration_photo(self, image, on_reveal, style="normal"):
         if not self.rig.can_show_exploration() or not self._start("exploration_photo"):
             return False
         self.photo = image
+        self.photo_style = style
         self._reveal_photo = on_reveal
         return True
 
@@ -175,13 +177,14 @@ class SocialGestures:
         elif self.kind in {"clink", "stretch"} and t >= 2.6:
             self.clear()
         elif self.kind == "exploration_photo":
-            if before < photo_share_motion.REVEAL_SECONDS:
+            if self._reveal_photo is not None:
                 if self.rig._idle_blocked():
                     self.clear()
                     return
-                if t >= photo_share_motion.REVEAL_SECONDS:
-                    self._reveal_photo()
-            if t >= photo_share_motion.DURATION_SECONDS:
+                if photo_share_motion.motion_time(t, self.photo_style) >= photo_share_motion.REVEAL_SECONDS:
+                    reveal, self._reveal_photo = self._reveal_photo, None
+                    reveal()
+            if photo_share_motion.motion_time(t, self.photo_style) >= photo_share_motion.DURATION_SECONDS:
                 self.clear()
 
     def apply_pose(self, pose):
@@ -210,7 +213,7 @@ class SocialGestures:
             head.angle += 3 * grin
             pose.nodes["body"].dy -= abs(math.sin((t - 0.32) * 7.4)) * 5 * grin
         elif self.kind == "exploration_photo":
-            photo_share_motion.apply_pose(pose, t)
+            photo_share_motion.apply_pose(pose, t, self.photo_style)
 
     def eating_texture(self, awake):
         t = self.age

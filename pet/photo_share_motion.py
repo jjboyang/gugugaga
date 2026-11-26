@@ -12,7 +12,17 @@ REVEAL_SECONDS = 1.24
 DURATION_SECONDS = 1.68
 
 
-def apply_pose(pose, age):
+def motion_time(seconds, style):
+    if style == "eager":
+        return seconds * 1.22
+    if style == "peek":
+        # Linger over the back of the print before turning it towards the user.
+        return seconds - 0.35 * smooth((seconds - 0.83) / 0.58)
+    return seconds
+
+
+def apply_pose(pose, age, style="normal"):
+    age = motion_time(age, style)
     lean = smooth(age / 0.28) * (1 - smooth((age - 0.85) / 0.31))
     lift = smooth((age - 0.77) / 0.41) * (1 - smooth((age - 1.43) / 0.25))
     searching = lean * math.sin(age * math.tau * 2.3)
@@ -27,9 +37,25 @@ def apply_pose(pose, age):
     right.dy += 7 * searching - 11 * lift
     right.angle -= 12 * lift
     pose.mouth_open += 0.16 * lift
+    if style == "eager":
+        reach = smooth((age - 0.53) / 0.43) * (1 - smooth((age - 1.34) / 0.34))
+        # Lean the original seated rig forward as a whole, with both feet planted.
+        body.dx += 4 * reach
+        body.dy -= 4 * reach
+        head.dx += 7 * reach
+        head.angle -= 3 * reach
+        right.dy -= 5 * reach
+        pose.mouth_open += 0.20 * reach
+    elif style == "peek":
+        glance = smooth((age - 0.60) / 0.23) * (1 - smooth((age - 1.02) / 0.18))
+        head.angle += 6 * glance
+        head.dy += 3 * glance
+        pose.gaze_x += (0.85 - pose.gaze_x) * glance
+        pose.gaze_y += (0.65 - pose.gaze_y) * glance
 
 
-def texture(awake, image, age):
+def texture(awake, image, age, style="normal"):
+    age = motion_time(age, style)
     result = QPixmap(awake)
     painter = QPainter(result)
     painter.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -56,12 +82,22 @@ def texture(awake, image, age):
     painter.setOpacity(smooth((age - 0.73) / 0.19) * (1 - smooth((age - 1.44) / 0.24)))
     painter.translate(255 + 32 * pull, 423 - 44 * pull)
     painter.rotate(-10 + 16 * pull)
+    if style == "eager":
+        reach = 1 + 0.25 * pull
+        painter.scale(reach, reach)
+    turn = smooth((age - 0.99) / 0.23) if style == "peek" else 1.0
+    painter.scale(max(0.045, abs(math.cos(math.pi * turn))), 1)
     painter.setPen(QPen(QColor("#8599b8"), 1.8))
     painter.setBrush(QColor("#fbfcff"))
     painter.drawRoundedRect(QRectF(-36, -28, 72, 58), 4, 4)
-    image_size = image.size().scaled(62, 43, Qt.KeepAspectRatio)
-    painter.drawImage(QRectF(-image_size.width() / 2, -25 + (43 - image_size.height()) / 2,
-                            image_size.width(), image_size.height()), image)
+    if turn < 0.5:
+        painter.setPen(QPen(QColor("#b8c9dc"), 1.6, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(-25, 15, -4, 15)
+        painter.drawLine(-25, 20, -12, 20)
+    else:
+        image_size = image.size().scaled(62, 43, Qt.KeepAspectRatio)
+        painter.drawImage(QRectF(-image_size.width() / 2, -25 + (43 - image_size.height()) / 2,
+                                image_size.width(), image_size.height()), image)
     painter.restore()
 
     # Keep the original fingers in front of both the paper folder and the print.

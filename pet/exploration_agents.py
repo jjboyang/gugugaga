@@ -69,6 +69,11 @@ VIDEO_INSTRUCTIONS = """
 选择第 1 条时，若感想参考了视频片段，填 video_choice 为对应证据编号。选画面依据时，另外在 video_observation 用一句话写图中可见的细节。
 选择字幕或转写时，程序会保留原文。没有参考片段时填 null。"""
 
+FOLLOWUP_INSTRUCTIONS = """
+这次是在接着聊上一次分享，user_question 是家人的原话。结合原话所指的事去找资料。
+只有本次所选来源的正文、字幕、实际画面或配图直接回答了这个问题，才用自己的话写一句简短的回答。
+回答要能从保留的 observation 或选中的图片中核对。只有简介、仅仅同题、靠常识猜测或没找到时留空。"""
+
 
 def build_audio_request(sample):
     boundary = "dafeiyu-" + uuid4().hex
@@ -85,22 +90,32 @@ def read_audio_transcript(raw, sample):
 
 def build_request(connection, activity, *, website=None):
     if connection.provider == "deepseek":
-        topic = re.sub(r"[^\w\s]", " ", activity.topic)
-        topic = re.sub(r"\bOR\b", " ", topic, flags=re.IGNORECASE)
+        topic = activity.topic
         domain = website.domain
-        keywords = (" ".join(topic.split()) or "海边 小动物")[:122 - len(domain)]
+        # Keep the actual question when trimming contextual keywords for site search.
+        if activity.question:
+            topic = activity.question + " " + topic.removesuffix(activity.question)
+        topic = re.sub(r"[^\w\s]", " ", topic)
+        topic = re.sub(r"\bOR\b", " ", topic, flags=re.IGNORECASE)
+        keywords = (" ".join(topic.split()) or "海边 小动物")[:max(1, 122 - len(domain))]
         return {"query": f"{keywords} site:{domain}", "count": 8}
 
     previous = {}
     if activity.previous_url:
         previous = {"url": activity.previous_url, "reaction": activity.previous_reaction}
+        if activity.previous_observation:
+            previous["observation"] = activity.previous_observation
     if connection.provider == "openai":
         context = {"topic": activity.topic, "previous": previous}
         if activity.familiar_details:
             context["familiar_details"] = activity.familiar_details
+        instructions = INSTRUCTIONS
+        if activity.question:
+            context["user_question"] = activity.question
+            instructions += FOLLOWUP_INSTRUCTIONS + "另起一行写「回答：」，没有答案就留空。"
         return {
             "model": connection.model,
-            "instructions": INSTRUCTIONS,
+            "instructions": instructions,
             "input": json.dumps(context, ensure_ascii=False),
             "tools": [{"type": "web_search", "search_context_size": "low"}],
             "tool_choice": "required",
@@ -118,15 +133,21 @@ def build_request(connection, activity, *, website=None):
     }
     if activity.familiar_details:
         task["familiar_details"] = activity.familiar_details
+    instructions = ""
+    fields = ["liked_detail", "subject"]
+    if activity.question:
+        task["user_question"] = activity.question
+        instructions = FOLLOWUP_INSTRUCTIONS + "用 followup_answer 字段返回回答或空字符串。"
+        fields.append("followup_answer")
     if connection.provider == "dify":
         return {
             "inputs": {},
-            "query": DIFY_INSTRUCTIONS + "\n" + json.dumps(task, ensure_ascii=False),
+            "query": DIFY_INSTRUCTIONS + instructions + "\n" + json.dumps(task, ensure_ascii=False),
             "response_mode": "streaming",
             "user": "dafeiyu-" + connection.id,
             "auto_generate_name": False,
         }
-    return {**task, "persona": PERSONA, "optional_result_fields": ["liked_detail", "subject"]}
+    return {**task, "persona": PERSONA + instructions, "optional_result_fields": fields}
 
 
 def _json_object(raw, error_message):
@@ -228,6 +249,11 @@ def build_website_reaction(connection, activity, results, links, pictures=(), ti
     if activity.familiar_details:
         task["familiar_details"] = activity.familiar_details
     instructions = DEEPSEEK_WEBSITE_INSTRUCTIONS
+    if activity.question:
+        task["user_question"] = activity.question
+        task["previous_reaction"] = activity.previous_reaction
+        task["previous_observation"] = activity.previous_observation
+        instructions += FOLLOWUP_INSTRUCTIONS + "用 followup_answer 字段返回回答或空字符串。"
     evidence = _video_evidence(timed_text, pictures)
     if evidence:
         instructions += VIDEO_INSTRUCTIONS
@@ -282,6 +308,7 @@ def parse_website_reaction(raw, candidates, links, activity, pictures=(), timed_
         **candidate,
         "liked_detail": result.get("liked_detail"),
         "subject": result.get("subject"),
+        "followup_answer": result.get("followup_answer"),
         "reaction": result.get("reaction"),
         "next_topic": result.get("next_topic"),
     }, capability="web")
@@ -326,8 +353,11 @@ def _validate_result(result, *, capability):
     detail = _clean(result.get("liked_detail"), 48)
     if detail.rstrip("。") in {"无", "暂无", "没有"}:
         detail = ""
+    answer = _clean(result.get("followup_answer"), 100)
+    if answer.rstrip("。") in {"无", "暂无", "没有", "未找到", "不知道"}:
+        answer = ""
     return Discovery(title, result["url"], kind, observation, reaction, next_topic, liked_detail=detail,
-                     subject=_clean(result.get("subject"), 32))
+                     subject=_clean(result.get("subject"), 32), followup_answer=answer)
 
 
 def _openai_result(data):
@@ -362,7 +392,7 @@ def _openai_result(data):
     citation_link = r"\(\[[^\]]+\]\(https?://[^\s)]+\)\)"
     for line in "\n".join(texts).splitlines():
         line = re.sub(citation_link, "", line).replace("**", "").strip()
-        match = re.match(r"^(看到|想法|下次|证据|偏爱|题材)\s*[：:]\s*(.*)$", line)
+        match = re.match(r"^(看到|想法|下次|证据|偏爱|题材|回答)\s*[：:]\s*(.*)$", line)
         if match:
             fields[match[1]] = match[2]
 
@@ -377,6 +407,7 @@ def _openai_result(data):
         "reaction": fields.get("想法"),
         "liked_detail": fields.get("偏爱"),
         "subject": fields.get("题材"),
+        "followup_answer": fields.get("回答"),
         "next_topic": "" if next_topic.rstrip("。") in {"无", "暂无"} else next_topic,
     }
 

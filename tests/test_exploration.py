@@ -279,6 +279,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         result = {
+            "/answer": WEB_RESULT | {"observation": "观察员在退潮后看见它走到沙洲上。",
+                                    "followup_answer": "退潮后，它去了沙洲。"},
             "/video": VIDEO_RESULT,
             "/deepseek-search": BILIBILI_SEARCH_RESULT,
             "/deepseek-empty": {"results": BILIBILI_SEARCH_RESULT["results"][:2]},
@@ -620,9 +622,85 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertIsNone(diary.latest_unshared())
         share = self.window._speech_popup
         self.assertEqual(share.reply.text, WEB_RESULT["reaction"] + "\n" + WEB_RESULT["observation"])
-        self.assertIsNone(share.answer_button)
+        self.assertEqual(share.answer_button.text(), "我还想知道…")
         self.assertTrue(share.isVisible())
         self.assertIsNone(controller.panel)
+
+    def test_question_from_bubble_survives_restart_and_answer_has_sharing_priority(self):
+        controller, diary = self.controller, self.controller.diary
+        now = datetime.now()
+        day = now.date().isoformat()
+        agent = self.connection("answer", "web")
+        controller.save_connection(agent, None, "")
+        source = diary.reserve(agent, Activity("海鸟", "web", "海鸟"), now.timestamp(), day, 3)
+        diary.finish(source, Discovery(**WEB_RESULT))
+        self.window.show()
+        controller._accept_invitation(diary.latest_unshared())
+        bubble = self.window._speech_popup
+        QTest.mouseClick(bubble.answer_button, Qt.LeftButton)
+        self.assertFalse(bubble._hold_timer.isActive())
+        question = "退潮后它去了哪里？"
+        bubble.question_edit.setText(question)
+        QTest.keyClick(bubble.question_edit, Qt.Key_Return)
+        self.assertEqual(diary.pending_question()["question"], question)
+        self.close_pet(controller, self.window)
+        self.make_pet()
+        controller, diary = self.controller, self.controller.diary
+        controller.start_exploring()
+        self.finish_round()
+        request = self.server.received[-1][1]
+        self.assertEqual(request["previous"]["url"], WEB_RESULT["url"])
+        self.assertEqual(request["user_question"], question)
+        self.assertIsNone(diary.pending_question())
+        ordinary = diary.reserve(agent, Activity("小吃", "web", "小吃"), now.timestamp(), day, 3)
+        diary.finish(ordinary, Discovery(**WEB_RESULT))
+        reply = diary.latest_unshared()
+        self.assertEqual(reply["answer"], "退潮后，它去了沙洲。")
+        self.window.show()
+        controller._accept_invitation(reply)
+        self.assertIn(question, self.window._speech_popup.reply.text)
+        self.assertIn(reply["answer"], self.window._speech_popup.reply.text)
+        self.assertIsNone(controller.panel)
+        self.assertEqual(diary.latest_unshared()["id"], ordinary)
+
+    def test_unanswered_attempt_leaves_room_to_roam_and_replacement_ignores_stale_reply(self):
+        diary = self.controller.diary
+        agent = self.connection("web", "web")
+        now = datetime.now()
+        normal = Activity("海鸟", "web", "海鸟")
+        def reserve(activity):
+            return diary.reserve(agent, activity, now.timestamp(), now.date().isoformat(), 10)
+        source = reserve(normal)
+        diary.finish(source, Discovery(**WEB_RESULT))
+        diary.mark_shared(source)
+        diary.remember_question(source, "它去哪了？")
+        task = diary.question_activity(["web"])
+        attempt = reserve(task)
+        diary.finish(attempt, Discovery(**VIDEO_RESULT, followup_answer="只看简介猜的"), question_id=task.question_id)
+        self.assertIsNone(diary.question_activity(["web"]))
+        self.assertIsNone(diary.latest_unshared())
+        ordinary = reserve(normal)
+        diary.finish(ordinary, Discovery(**WEB_RESULT))
+        retry = diary.question_activity(["web"])
+        attempt = reserve(retry)
+        diary.remember_question(source, "冬天也来吗？", retry.question_id)
+        diary.finish(attempt, Discovery(**WEB_RESULT, followup_answer="旧问题的答案"), question_id=retry.question_id)
+        self.assertEqual(diary.latest_unshared()["id"], ordinary)
+        self.assertEqual(diary.pending_question()["question"], "冬天也来吗？")
+
+    def test_recognized_detail_gets_eager_gesture_and_new_photo_can_be_playful(self):
+        controller, diary = self.controller, self.controller.diary
+        agent = self.connection("web", "web")
+        today = datetime.now()
+        photo = ExplorationPicture(PICTURE_URL, "figure", PICTURE_REASON, picture_bytes("JPEG"))
+        note = replace(Discovery(**WEB_RESULT), picture=photo, liked_detail="湿羽毛")
+        for days_ago, url, style in ((3, WEB_RESULT["url"], "peek"), (0, LINKED_PAGE, "eager")):
+            day = today - timedelta(days=days_ago)
+            outing = diary.reserve(agent, Activity("海鸟", "web", "海鸟"), day.timestamp(), day.date().isoformat(), 3)
+            diary.finish(outing, replace(note, url=url))
+            with patch.object(controller.rng, "random", return_value=0.1):
+                controller._accept_invitation(diary.latest_unshared())
+            self.assertEqual(self.rig.social.show_exploration_photo.call_args.args[2], style)
 
     def test_invitation_reveals_the_saved_photo_after_looking_through_prints(self):
         controller = self.controller
@@ -630,6 +708,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         rig = RigAnimator(SimpleNamespace(current_phase="idle", notify_user_activity=lambda: None),
                           self.window, assets, parent=self.window)
         controller.rig = rig
+        controller.rng.random = lambda: 0.8  # Standard rummage timing for the interruption check.
         self.window.show()
         rig.set_enabled(True)
         rig.timer.stop()
@@ -662,7 +741,7 @@ class ExplorationIntegrationTests(unittest.TestCase):
         self.assertTrue(share.isVisible())
         self.assertEqual(share.reply.text, PICTURE_REASON)
         self.assertEqual(share.image.size().toTuple(), (320, 240))
-        self.assertIsNone(share.answer_button)
+        self.assertEqual(share.answer_button.text(), "我还想知道…")
         self.assertIsNone(controller.panel)
         self.assertIsNone(diary.latest_unshared())
         rig._paint(DURATION_SECONDS - REVEAL_SECONDS)

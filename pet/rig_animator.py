@@ -767,7 +767,7 @@ class RigAnimator(QObject):
                     deformer = self.social.lift_snack
                 elif self.social.kind == "exploration_photo":
                     texture = photo_share_motion.texture(
-                        self.renderer._awake_texture(pose), self.social.photo, self.social.age,
+                        self.renderer._awake_texture(pose), self.social.photo, self.social.age, self.social.photo_style,
                     )
             pixmap = self.renderer.render(pose, scale=scale, texture=texture, vertex_deformer=deformer)
         self._present(pixmap)
