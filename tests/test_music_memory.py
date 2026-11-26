@@ -127,17 +127,19 @@ class MelodyTests(unittest.TestCase):
                                                  Path("/music/track.m4a"), loopback=False))
 
     def test_windows_filters_browser_playback_and_keeps_qq_music(self):
-        def session(app, title, kind, *, artist="作者", media_kind=None):
-            info = SimpleNamespace(playback_status=4, playback_type=kind)
-            media = SimpleNamespace(title=title, artist=artist, album_artist="", playback_type=media_kind)
+        def session(app, title, kind, *, artist="作者", album_artist="", media_kind=None, status=4):
+            info = SimpleNamespace(playback_status=status, playback_type=kind)
+            media = SimpleNamespace(title=title, artist=artist, album_artist=album_artist, playback_type=media_kind)
             return SimpleNamespace(source_app_user_model_id=app, get_playback_info=lambda: info,
                                    try_get_media_properties_async=AsyncMock(return_value=media))
 
-        chrome = session("Chrome", "网页视频", 0)
+        chrome = session("Chrome", "B站视频 · QQ音乐", 0)
+        web_app = session("MSEdge._crx_qqmusic", "另一段网页视频", 1, media_kind=1)
         firefox = session("308046B0AF4A39CB", "像歌曲一样标记的视频", 1, artist="", media_kind=1)
-        music_video = session("QQMusic.exe", "音乐视频", 1, media_kind=2)
-        music = session("QQMusic.EXE", "今天的歌", None, artist="")
-        videos = [chrome, firefox, music_video]
+        qq_browser = session("qmbrowser.exe", "客户端网页视频", 1)
+        music_video = session("903DB504.QQWP_a99ra4d2cbcxa!QQMusicUWP", "音乐视频", 1, media_kind=2)
+        paused = session("QQMusic", "暂停的歌", 1, status=5)
+        ignored = [chrome, web_app, firefox, qq_browser, music_video, paused]
         manager = SimpleNamespace(get_current_session=lambda: chrome, get_sessions=Mock())
         api = {
             "winrt.windows.media": SimpleNamespace(MediaPlaybackType=SimpleNamespace(UNKNOWN=0, MUSIC=1)),
@@ -149,16 +151,24 @@ class MelodyTests(unittest.TestCase):
             ),
         }
         with patch.dict(sys.modules, api):
-            manager.get_sessions.return_value = videos
+            manager.get_sessions.return_value = ignored
             self.assertIsNone(asyncio.run(_windows_track()))
-            manager.get_sessions.return_value = [*videos, music]
-            track = asyncio.run(_windows_track())
-            manager.get_sessions.return_value = [music]
-            clean_track = asyncio.run(_windows_track())
-        self.assertEqual(track, PlayingTrack("今天的歌", "", "QQMusic.EXE", loopback=False))
-        self.assertTrue(clean_track.loopback)
-        chrome.try_get_media_properties_async.assert_not_called()
-        firefox.try_get_media_properties_async.assert_not_called()
+            for app, kind in (
+                (r"C:\Tencent\QQMusic\QQMusic.EXE", None),
+                ("QQMusic", 0),
+                ("QQ音乐", None),
+                ("Tencent.QQMusic", 1),
+                ("903DB504.QQWP_a99ra4d2cbcxa!QQMusicUWP", 1),
+            ):
+                with self.subTest(app=app):
+                    music = session(app, "今天的歌", kind, artist=None, album_artist=None)
+                    manager.get_sessions.return_value = [*ignored, music]
+                    track = asyncio.run(_windows_track())
+                    self.assertEqual(track, PlayingTrack("今天的歌", "", app, loopback=False))
+                    manager.get_sessions.return_value = [paused, music]
+                    self.assertTrue(asyncio.run(_windows_track()).loopback)
+        for rejected in (chrome, web_app, firefox, qq_browser, paused):
+            rejected.try_get_media_properties_async.assert_not_called()
 
     def test_sampler_drops_a_clip_when_the_song_changes_mid_capture(self):
         track = PlayingTrack("这首", "歌手", "player")

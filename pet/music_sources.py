@@ -24,10 +24,12 @@ _AUDIO_EXTENSIONS = {".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".mp3", 
 _HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _QQ_MUSIC_BUNDLE = "com.tencent.QQMusicMac"
 _WINDOWS_MUSIC_PLAYERS = {
-    "qqmusic.exe", "cloudmusic.exe", "spotify.exe", "itunes.exe", "foobar2000.exe",
+    "903db504.qqwp_a99ra4d2cbcxa",  # QQ Music UWP package family
+    "cloudmusic.exe", "spotify.exe", "itunes.exe", "foobar2000.exe",
     "aimp.exe", "musicbee.exe", "spotifyab.spotifymusic_zpdnekdrzrea0",
     "appleinc.applemusicwin_nzyj5cx40ttqa", "microsoft.zunemusic_8wekyb3d8bbwe",
 }
+_WINDOWS_QQ_MUSIC_PREFIXES = ("qqmusic", "qq音乐", "tencent.qqmusic", "com.tencent.qqmusic")
 _MPRIS_MUSIC_PLAYERS = {
     "spotify", "rhythmbox", "clementine", "strawberry", "lollypop", "audacious", "elisa",
     "cmus", "mpd", "mopidy", "netease-cloud-music", "qqmusic", "yesplaymusic",
@@ -92,12 +94,13 @@ async def _windows_track():
         player = session.source_app_user_model_id
         app = PureWindowsPath(player.partition("!")[0]).name.casefold()
         # Browsers can report music-style metadata, even for videos.
-        if app not in _WINDOWS_MUSIC_PLAYERS or info.playback_type not in music_types:
+        music_player = app in _WINDOWS_MUSIC_PLAYERS or app.startswith(_WINDOWS_QQ_MUSIC_PREFIXES)
+        if not music_player or info.playback_type not in music_types:
             continue
         media = await session.try_get_media_properties_async()
         if media is None or media.playback_type not in music_types:
             continue
-        track = _track(media.title, media.artist or media.album_artist, player,
+        track = _track(media.title, media.artist or media.album_artist or "", player,
                        loopback=len(playing) == 1, music=True)
         if track is not None:
             return track
