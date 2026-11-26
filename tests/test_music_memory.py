@@ -23,7 +23,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QApplication, QPushButton
 
-from pet.music_history import MusicMemory, Observation, _observe
+from pet.music_history import ListeningHistory, MusicMemory, Observation, _observe
 from pet.music_melody import SAMPLE_RATE, extract_phrase, hum_wave
 from pet.music_sources import PlayingTrack, _linux_track, _mac_track, _windows_track, read_playback, sample_playback
 from pet.rig_animator import RigAnimator
@@ -79,14 +79,21 @@ class MelodyTests(unittest.TestCase):
     def test_mpris_skips_paused_players_and_decodes_local_file_uris(self):
         rows = [
             ("Paused", "other", "跳过这首", "歌手", "5", ""),
+            ("Playing", "chromium.instance42", "网页视频", "频道作者", "0", "https://example.com/video"),
+            ("Playing", "spotify", "本地视频", "作者", "0", "file:///movies/video.mp4"),
             ("Playing", "player", "  晚上的歌  ", "歌手", "12000000", "file:///music/A%20B.flac"),
-            ("Playing", "browser", "网页视频", "", "0", "https://example.com"),
         ]
         with patch("pet.music_sources._command", return_value="\n".join("\x1f".join(row) for row in rows)):
             playing = _linux_track()
         self.assertEqual((playing.title, playing.artist, playing.position), ("晚上的歌", "歌手", 12))
         self.assertEqual(playing.local_file, Path("/music/A B.flac"))
         self.assertFalse(playing.loopback)
+
+    def test_mpris_reads_music_app_without_local_url(self):
+        row = ("Playing", "spotify", "秋天", "歌手", "0", "")
+        with patch("pet.music_sources._command", return_value="\x1f".join(row)):
+            playing = _linux_track()
+        self.assertEqual(playing, PlayingTrack("秋天", "歌手", "spotify"))
 
     def test_mac_reads_playing_qq_music_even_when_finder_omits_homebrew_from_path(self):
         bundle = "com.tencent.QQMusicMac"
@@ -119,15 +126,19 @@ class MelodyTests(unittest.TestCase):
             self.assertEqual(track, PlayingTrack("本地歌曲", "作者", "com.apple.Music", 11,
                                                  Path("/music/track.m4a"), loopback=False))
 
-    def test_windows_ignores_a_foreground_video_and_skips_a_mixed_loopback(self):
-        def session(name, kind):
+    def test_windows_filters_browser_playback_and_keeps_qq_music(self):
+        def session(app, title, kind, *, artist="作者", media_kind=None):
             info = SimpleNamespace(playback_status=4, playback_type=kind)
-            media = SimpleNamespace(title=name, artist="歌手", album_artist="", playback_type=kind)
-            return SimpleNamespace(source_app_user_model_id=name, get_playback_info=lambda: info,
+            media = SimpleNamespace(title=title, artist=artist, album_artist="", playback_type=media_kind)
+            return SimpleNamespace(source_app_user_model_id=app, get_playback_info=lambda: info,
                                    try_get_media_properties_async=AsyncMock(return_value=media))
 
-        video, music = session("视频", 2), session("今天的歌", 1)
-        manager = SimpleNamespace(get_current_session=lambda: video, get_sessions=lambda: [video, music])
+        chrome = session("Chrome", "网页视频", 0)
+        firefox = session("308046B0AF4A39CB", "像歌曲一样标记的视频", 1, artist="", media_kind=1)
+        music_video = session("QQMusic.exe", "音乐视频", 1, media_kind=2)
+        music = session("QQMusic.EXE", "今天的歌", None, artist="")
+        videos = [chrome, firefox, music_video]
+        manager = SimpleNamespace(get_current_session=lambda: chrome, get_sessions=Mock())
         api = {
             "winrt.windows.media": SimpleNamespace(MediaPlaybackType=SimpleNamespace(UNKNOWN=0, MUSIC=1)),
             "winrt.windows.media.control": SimpleNamespace(
@@ -138,10 +149,16 @@ class MelodyTests(unittest.TestCase):
             ),
         }
         with patch.dict(sys.modules, api):
+            manager.get_sessions.return_value = videos
+            self.assertIsNone(asyncio.run(_windows_track()))
+            manager.get_sessions.return_value = [*videos, music]
             track = asyncio.run(_windows_track())
-        self.assertEqual(track.title, "今天的歌")
-        self.assertFalse(track.loopback)
-        video.try_get_media_properties_async.assert_not_called()
+            manager.get_sessions.return_value = [music]
+            clean_track = asyncio.run(_windows_track())
+        self.assertEqual(track, PlayingTrack("今天的歌", "", "QQMusic.EXE", loopback=False))
+        self.assertTrue(clean_track.loopback)
+        chrome.try_get_media_properties_async.assert_not_called()
+        firefox.try_get_media_properties_async.assert_not_called()
 
     def test_sampler_drops_a_clip_when_the_song_changes_mid_capture(self):
         track = PlayingTrack("这首", "歌手", "player")
@@ -214,6 +231,38 @@ class MusicMemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.exploration_topics(today), [("潮水 (Live) 测试歌手", 4)])
         self.memory.set_enabled(False)
         self.assertEqual(self.memory.exploration_topics(today), [])
+
+    def test_legacy_video_history_is_archived_outside_songs_humming_and_exploration(self):
+        self.enable()
+        history = self.memory.history
+        history.set_exploration_enabled(True)
+        today = datetime(2026, 11, 26).date()
+        yesterday = (today - timedelta(days=1)).isoformat()
+        song = PlayingTrack("海边", "歌手", "player")
+        unknown_artist = PlayingTrack("航拍记录", "", "browser")
+        videos = (PlayingTrack("海上旅行_bilibili", "作者", "browser"),
+                  PlayingTrack("【弹幕】海上旅行", "作者", "browser"), unknown_artist)
+        phrase = ((60, 0.0, 0.5), (64, 0.5, 0.5), (67, 1.0, 0.5))
+        for track in (song, *videos):
+            history.add_listen(track, yesterday, 180, 1)
+            history.save_melody(track, phrase)
+        history.connection.execute("PRAGMA user_version = 0")
+
+        upgraded = ListeningHistory(self.path)
+        self.addCleanup(upgraded.connection.close)
+        self.assertEqual([row["title"] for row in upgraded.songs(yesterday)], [song.title])
+        self.assertEqual(upgraded.exploration_topics(today), [("海边 歌手", 2)])
+        self.assertEqual([row["track_key"] for row in upgraded.hum_candidates(today)], [song.key])
+        archive = upgraded.connection.execute("SELECT track_key, melody FROM music_unverified_tracks")
+        self.assertEqual(dict(archive), {track.key: json.dumps(phrase) for track in videos})
+        self.assertEqual(upgraded.connection.execute("SELECT COUNT(*) FROM music_unverified_days").fetchone()[0], 3)
+
+        new_song = PlayingTrack(unknown_artist.title, "", "QQMusic.exe")
+        upgraded.add_listen(new_song, today.isoformat(), 12, 2)
+        reopened = ListeningHistory(self.path)
+        self.addCleanup(reopened.connection.close)
+        self.assertEqual([tuple(row) for row in reopened.songs(today.isoformat())], [(new_song.title, "", 0)])
+        self.assertEqual([row["title"] for row in reopened.songs(yesterday)], [song.title])
 
     def test_mac_listening_panel_hints_at_qq_music_setup_when_needed(self):
         with patch("pet.music_history.sys", SimpleNamespace(platform="darwin")), \

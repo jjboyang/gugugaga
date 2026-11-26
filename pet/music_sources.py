@@ -5,7 +5,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 import sys
@@ -23,6 +23,15 @@ _FIELD_SEPARATOR = "\x1f"
 _AUDIO_EXTENSIONS = {".aac", ".aif", ".aiff", ".alac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".wma"}
 _HIDDEN_PROCESS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _QQ_MUSIC_BUNDLE = "com.tencent.QQMusicMac"
+_WINDOWS_MUSIC_PLAYERS = {
+    "qqmusic.exe", "cloudmusic.exe", "spotify.exe", "itunes.exe", "foobar2000.exe",
+    "aimp.exe", "musicbee.exe", "spotifyab.spotifymusic_zpdnekdrzrea0",
+    "appleinc.applemusicwin_nzyj5cx40ttqa", "microsoft.zunemusic_8wekyb3d8bbwe",
+}
+_MPRIS_MUSIC_PLAYERS = {
+    "spotify", "rhythmbox", "clementine", "strawberry", "lollypop", "audacious", "elisa",
+    "cmus", "mpd", "mopidy", "netease-cloud-music", "qqmusic", "yesplaymusic",
+}
 
 
 @dataclass(frozen=True)
@@ -73,22 +82,23 @@ async def _windows_track():
 
     manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
     current = manager.get_current_session()
+    music_types = (None, MediaPlaybackType.UNKNOWN, MediaPlaybackType.MUSIC)
     sessions = [(session, session.get_playback_info()) for session in manager.get_sessions()]
     playing = [(session, info) for session, info in sessions
                if info is not None and info.playback_status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING]
     if current is not None:
         playing.sort(key=lambda pair: pair[0].source_app_user_model_id != current.source_app_user_model_id)
     for session, info in playing:
-        if info.playback_type not in (None, MediaPlaybackType.UNKNOWN, MediaPlaybackType.MUSIC):
+        player = session.source_app_user_model_id
+        app = PureWindowsPath(player.partition("!")[0]).name.casefold()
+        # Browsers can report music-style metadata, even for videos.
+        if app not in _WINDOWS_MUSIC_PLAYERS or info.playback_type not in music_types:
             continue
         media = await session.try_get_media_properties_async()
-        if media is None:
+        if media is None or media.playback_type not in music_types:
             continue
-        content_type = media.playback_type if media.playback_type is not None else info.playback_type
-        if content_type not in (None, MediaPlaybackType.UNKNOWN, MediaPlaybackType.MUSIC):
-            continue
-        track = _track(media.title, media.artist or media.album_artist, session.source_app_user_model_id,
-                       loopback=len(playing) == 1, music=content_type == MediaPlaybackType.MUSIC)
+        track = _track(media.title, media.artist or media.album_artist, player,
+                       loopback=len(playing) == 1, music=True)
         if track is not None:
             return track
     return None
@@ -170,9 +180,13 @@ def _linux_track():
         _, player, title, artist, position, url = row
         source = urlsplit(url)
         path = Path(unquote(source.path)) if source.scheme == "file" and source.netloc in ("", "localhost") else None
+        local_audio = path is not None and path.suffix.lower() in _AUDIO_EXTENSIONS
+        music_player = player.casefold().partition(".")[0] in _MPRIS_MUSIC_PLAYERS
+        if not local_audio and (path is not None or not music_player):
+            continue
         seconds = float(position) / 1_000_000 if position.isdecimal() else 0.0
         track = _track(title, artist, player, position=seconds, path=path,
-                       loopback=len(playing) == 1, music=path is not None and path.suffix.lower() in _AUDIO_EXTENSIONS)
+                       loopback=len(playing) == 1, music=True)
         if track is not None:
             return track
     return None

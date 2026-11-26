@@ -162,7 +162,9 @@ python scripts/preview-pomodoro.py --export-dir preview/pomodoro
 
 她逛网站哼歌时优先挑当天记住的旋律。当天没有可用旋律时，会从近一周挑一首。还没有记住旋律时，她会哼原来的小调。原始音频只在内存中做短时分析，听歌记录和提取后的旋律保存在本机 `~/.desktop-pet/music.sqlite3`。
 
-Windows 10 1809 及以上通过系统媒体会话读取曲名。在默认播放设备支持回录时，可从几秒系统播放输出中提取旋律。Linux 需要 `playerctl` 读取曲名，可以用 FFmpeg 读播放器公开的本地音频文件，也可以配合 `pactl` 读取默认输出。macOS 支持「音乐」和 Spotify 桌面版的曲目信息，首次使用可能需要允许自动化访问。macOS 的旋律提取适用于「音乐」提供的本地音频文件，需要 FFmpeg。
+Windows 10 1809 及以上通过系统媒体会话读取 QQ 音乐、Spotify、Apple Music 等受支持桌面播放器的曲名。在默认播放设备支持回录时，可从几秒系统播放输出中提取旋律。Linux 需要 `playerctl` 识别受支持的音乐播放器或本地音频文件。可以用 FFmpeg 读取本地音频文件，也可以配合 `pactl` 读取默认输出。macOS 支持「音乐」和 Spotify 桌面版的曲目信息，首次使用可能需要允许自动化访问。QQ 音乐需要先运行 `brew install media-control`。macOS 的旋律提取适用于「音乐」提供的本地音频文件，需要 FFmpeg。
+
+升级时，旧记录中带视频站标记或缺少歌手的条目会归档在本机数据库里，并从听歌记录、哼唱和探索中移出。之后在受支持的播放器里再次听到的歌曲会重新记录。
 
 macOS 上使用 QQ 音乐时，请先运行 `brew install media-control`。大肥鱼会通过系统「正在播放」记录 QQ 音乐的歌名和歌手。播放歌曲后，可以在控制中心的「正在播放」里确认 QQ 音乐是否已向系统提供曲目信息。
 

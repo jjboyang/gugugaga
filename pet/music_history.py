@@ -29,6 +29,10 @@ _MIN_LISTEN_SECONDS = 8
 _SAMPLE_RETRY_SECONDS = 18
 _SAMPLE_LIMIT = 3
 _RECENT_DAYS = 7
+_LEGACY_VIDEO_TITLE = re.compile(
+    r"^(?:【弹幕】|\[弹幕\])|哔哩哔哩|(?<![a-z0-9])bilibili(?![a-z0-9])|\s-\s(?:youtube|tiktok)$",
+    re.I,
+)
 
 
 class ListeningHistory:
@@ -52,6 +56,32 @@ class ListeningHistory:
                 FOREIGN KEY (track_key) REFERENCES music_tracks (track_key)
             );
         """)
+        self._archive_unverified_history()
+
+    def _archive_unverified_history(self):
+        with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            if self.connection.execute("PRAGMA user_version").fetchone()[0] >= 1:
+                return
+            # Older rows contain no playback source. Retain the original rows locally
+            # while removing likely videos and unverifiable titles from active memory.
+            tracks = self.connection.execute("SELECT track_key, title, artist, melody FROM music_tracks")
+            unverified = [track for track in tracks
+                          if not track["artist"].strip() or _LEGACY_VIDEO_TITLE.search(track["title"])]
+            if unverified:
+                self.connection.execute("CREATE TABLE music_unverified_tracks AS SELECT * FROM music_tracks WHERE 0")
+                self.connection.executemany("INSERT INTO music_unverified_tracks VALUES (?, ?, ?, ?)", unverified)
+                self.connection.execute("""
+                    CREATE TABLE music_unverified_days AS
+                    SELECT d.* FROM music_days d JOIN music_unverified_tracks t USING (track_key)
+                """)
+                self.connection.execute(
+                    "DELETE FROM music_days WHERE track_key IN (SELECT track_key FROM music_unverified_tracks)"
+                )
+                self.connection.execute(
+                    "DELETE FROM music_tracks WHERE track_key IN (SELECT track_key FROM music_unverified_tracks)"
+                )
+            self.connection.execute("PRAGMA user_version = 1")
 
     def enabled(self):
         return bool(self.connection.execute("SELECT enabled FROM music_memory WHERE id = 1").fetchone()[0])
@@ -360,7 +390,7 @@ class MusicHistoryPanel(QDialog):
         self.toggle = Toggle("记住我听过的音乐，用来哼唱")
         self.toggle.toggled.connect(memory.set_enabled)
         layout.addWidget(self.toggle)
-        layout.addWidget(label("开启后在本机记录曲名和歌手，短暂分析播放输出或本地音乐文件以提取旋律。", "muted", wrap=True))
+        layout.addWidget(label("开启后在本机记录受支持播放器的曲名和歌手，短暂分析播放输出或本地文件来提取旋律。", "muted", wrap=True))
         self.explore_music = Toggle("探索时用具体歌名和歌手搜索")
         self.explore_music.toggled.connect(self._set_explore_music)
         layout.addWidget(self.explore_music)
